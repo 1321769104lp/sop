@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -18,6 +19,72 @@ from sop import get_sop_info, production_day
 
 
 _scheduler = None
+
+
+def chinese_project_name(name: str) -> str:
+    """飞书里只显示中文项目名，去掉英文名和附加标注。"""
+    clean = (name or "").strip()
+    if not clean:
+        return clean
+
+    if not re.search(r"[\u4e00-\u9fff]", clean):
+        return clean
+
+    # 英文名在前、中文名在括号里时，优先取括号里的中文。
+    if re.match(r"^[A-Za-z0-9 :,'’!-]+[（(]", clean):
+        match = re.search(r"[（(]([^（）()]*[\u4e00-\u9fff][^（）()]*)[）)]", clean)
+        if match:
+            clean = match.group(1)
+
+    for separator in ["+", "：", ":"]:
+        if separator in clean:
+            left, right = clean.split(separator, 1)
+            if re.search(r"[A-Za-z]", right) and re.search(r"[\u4e00-\u9fff]", left):
+                clean = left
+                break
+
+    clean = re.sub(r"[（(][^（）()]*[A-Za-z][^（）()]*[）)]", "", clean)
+    clean = re.sub(r"[（(][^（）()]*组[^（）()]*[）)]", "", clean)
+    clean = re.sub(r"[（(][^（）()]*[）)]", "", clean)
+    clean = re.sub(r"\s+", " ", clean).strip(" ：:+-")
+    return clean
+
+
+def delivery_countdown(delivery_date: str | None, today: date) -> str:
+    """格式化交付倒计时。"""
+    if not delivery_date:
+        return "未配置"
+    delta = (date.fromisoformat(delivery_date) - today).days
+    if delta > 0:
+        return f"剩{delta}天"
+    if delta == 0:
+        return "今天交付"
+    return f"已超{abs(delta)}天"
+
+
+def concise_task(row: dict) -> str:
+    """把系统任务压缩成制片视角的短句。"""
+    stage = row.get("stage", "")
+    if row.get("stage") == "超期":
+        return "确认交付状态或延期方案"
+    if row.get("is_due_today"):
+        return f"确认{stage}产出"
+    return f"推进{stage}"
+
+
+def concise_risk(row: dict) -> str:
+    """把风险压缩到一行。"""
+    if row.get("stage") == "超期":
+        return "已过交付日，需立即确认"
+    if row.get("is_delivery"):
+        return "交付节点，注意验收和上传"
+    if row.get("is_first_episode"):
+        return "首集方向会影响后续批量制作"
+    if row.get("is_due_today"):
+        return "今天是节点日，必须收口"
+    if row.get("days_to_due") is not None and row["days_to_due"] <= 2:
+        return "节点临近，提前催产出"
+    return "按节点推进"
 
 
 def calculate_importance(info: dict) -> int:
@@ -42,11 +109,11 @@ def calculate_importance(info: dict) -> int:
 def build_priority_label(info: dict) -> str:
     """生成醒目的重点标签。"""
     if info.get("stage") == "超期":
-        return "【超期】"
+        return "【重点｜超期】"
     if info.get("is_due_today") and info.get("is_delivery"):
-        return "【今日交付】"
+        return "【重点｜今日交付】"
     if info.get("is_due_today"):
-        return "【今日节点】"
+        return "【重点｜今日节点】"
     if info.get("is_delivery"):
         return "【交付】"
     if info.get("is_first_episode"):
@@ -109,6 +176,7 @@ def build_custom_schedule_info(project: dict, milestones: list[dict], today=None
             "is_first_episode": False,
             "is_batch": False,
             "is_asset": False,
+            "delivery_date": final["due_date"].strftime("%Y-%m-%d"),
         }
         info["importance_rank"] = calculate_importance(info)
         return info
@@ -126,6 +194,7 @@ def build_custom_schedule_info(project: dict, milestones: list[dict], today=None
             "is_first_episode": False,
             "is_batch": False,
             "is_asset": False,
+            "delivery_date": final["due_date"].strftime("%Y-%m-%d"),
         }
         info["importance_rank"] = calculate_importance(info)
         return info
@@ -153,6 +222,7 @@ def build_custom_schedule_info(project: dict, milestones: list[dict], today=None
             "is_first_episode": "首集" in next_item["name"],
             "is_batch": "全集" in next_item["name"] or "一卡" in next_item["name"] or "制作" in next_item["name"],
             "is_asset": "资产" in next_item["name"],
+            "delivery_date": final["due_date"].strftime("%Y-%m-%d"),
         }
         info["importance_rank"] = calculate_importance(info)
         return info
@@ -178,6 +248,7 @@ def build_custom_schedule_info(project: dict, milestones: list[dict], today=None
         "is_first_episode": "首集" in stage_name,
         "is_batch": "全集" in stage_name or "一卡" in stage_name or "2-10" in stage_name,
         "is_asset": "资产" in stage_name,
+        "delivery_date": final["due_date"].strftime("%Y-%m-%d"),
     }
     info["importance_rank"] = calculate_importance(info)
     return info
@@ -199,18 +270,25 @@ def build_today_rows(today=None) -> list[dict]:
             info["is_batch"] = 5 <= info["day"] <= 8
             info["is_asset"] = 1 <= info["day"] <= 3
             info["days_to_due"] = max(0, 10 - info["day"]) if info["day"] > 0 else 999
+            start_date = date.fromisoformat(project["start_date"])
+            info["delivery_date"] = (start_date + timedelta(days=9)).strftime("%Y-%m-%d")
             info["importance_rank"] = calculate_importance(info)
 
         rows.append(
             {
                 "priority_label": build_priority_label(info),
                 "project_name": project["project_name"],
+                "display_name": chinese_project_name(project["project_name"]),
                 "start_date": project["start_date"],
                 "day": info["day"],
+                "delivery_date": info.get("delivery_date"),
+                "delivery_countdown": delivery_countdown(info.get("delivery_date"), today or date.today()),
                 "stage": info["stage"],
                 "task": info["task"],
-                "urge": project.get("owner") or info["urge"],
+                "today_focus": "",
+                "urge": "承制方",
                 "risk": info["risk"],
+                "risk_brief": "",
                 "status": project["status"],
                 "remark": project.get("remark", ""),
                 "importance_rank": info.get("importance_rank", 99),
@@ -220,6 +298,8 @@ def build_today_rows(today=None) -> list[dict]:
                 "is_due_today": info.get("is_due_today", False),
             }
         )
+        rows[-1]["today_focus"] = concise_task(rows[-1])
+        rows[-1]["risk_brief"] = concise_risk(rows[-1])
     return sorted(rows, key=reminder_sort_key)
 
 
@@ -251,13 +331,11 @@ def build_feishu_message(today=None) -> str:
         lines.extend(
             [
                 "",
-                f"{row['priority_label']}《{row['project_name']}》",
-                f"开始日期：{row['start_date']}",
-                f"今天是第{row['day']}天",
-                f"当前阶段：{row['stage']}",
-                f"今日任务：{row['task']}",
-                f"你要催：{row['urge']}",
-                f"风险提醒：{row['risk']}",
+                f"{row['priority_label']}《{row['display_name']}》",
+                f"阶段：{row['stage']}｜交付：{row['delivery_countdown']}",
+                f"今天重点：{row['today_focus']}",
+                "催：承制方",
+                f"风险：{row['risk_brief']}",
             ]
         )
     return "\n".join(lines)

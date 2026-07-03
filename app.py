@@ -167,20 +167,20 @@ def show_today_page():
     df = pd.DataFrame(rows)
     df = df.rename(
         columns={
-            "project_name": "项目名",
+            "project_name": "原项目名",
+            "display_name": "项目名",
             "start_date": "开始日期",
-            "day": "今天第几天",
+            "delivery_countdown": "交付倒计时",
             "stage": "当前阶段",
-            "task": "今日任务",
-            "urge": "需要催办的人",
-            "risk": "风险提醒",
+            "today_focus": "今天重点",
+            "risk_brief": "风险提醒",
             "status": "状态",
             "remark": "备注",
             "priority_label": "重点",
         }
     )
     df.insert(0, "序号", range(1, len(df) + 1))
-    display_cols = ["序号", "重点", "项目名", "开始日期", "今天第几天", "当前阶段", "今日任务", "需要催办的人", "风险提醒", "状态", "备注"]
+    display_cols = ["序号", "重点", "项目名", "交付倒计时", "当前阶段", "今天重点", "风险提醒", "状态"]
     st.dataframe(
         df[display_cols],
         use_container_width=True,
@@ -190,9 +190,8 @@ def show_today_page():
             "序号": st.column_config.NumberColumn("序号", width="small"),
             "重点": st.column_config.TextColumn("重点", width="small"),
             "项目名": st.column_config.TextColumn("项目名", width="large"),
-            "今日任务": st.column_config.TextColumn("今日任务", width="large"),
+            "今天重点": st.column_config.TextColumn("今天重点", width="large"),
             "风险提醒": st.column_config.TextColumn("风险提醒", width="large"),
-            "备注": st.column_config.TextColumn("备注", width="large"),
         },
     )
 
