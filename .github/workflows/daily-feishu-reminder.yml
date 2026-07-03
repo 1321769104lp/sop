@@ -1,0 +1,28 @@
+name: Daily Feishu Reminder
+
+on:
+  schedule:
+    # GitHub Actions 使用 UTC 时间。北京时间 11:07 = UTC 03:07。
+    - cron: "7 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  send-reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-actions.txt
+
+      - name: Send Feishu reminder
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+        run: python scripts/send_github_reminder.py
