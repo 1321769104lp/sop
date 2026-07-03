@@ -1,6 +1,8 @@
 ﻿from datetime import date, datetime
 from io import BytesIO
 import os
+import shutil
+import subprocess
 
 import pandas as pd
 import streamlit as st
@@ -37,6 +39,52 @@ from scripts.export_actions_data import export_actions_data
 
 STATUS_OPTIONS = ["进行中", "已交付", "延期", "暂停"]
 LEVEL_OPTIONS = ["自定义", "B级", "A级", "C级"]
+
+
+def find_git_executable() -> str:
+    """寻找可用的 Git。"""
+    bundled_git = r"C:\Users\zy-user\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd\git.exe"
+    return shutil.which("git") or bundled_git
+
+
+def run_git_command(args: list[str]) -> subprocess.CompletedProcess:
+    """在项目目录执行 Git 命令。"""
+    git_exe = find_git_executable()
+    return subprocess.run(
+        [git_exe, *args],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def sync_actions_data_to_github() -> str:
+    """导出云端数据文件，并提交推送到 GitHub。"""
+    export_actions_data()
+
+    status = run_git_command(["status", "--short", "data/projects_for_actions.json"])
+    if status.returncode != 0:
+        raise RuntimeError(status.stderr or status.stdout)
+    if not status.stdout.strip():
+        return "项目数据没有变化，GitHub 已经是最新。"
+
+    add_result = run_git_command(["add", "data/projects_for_actions.json"])
+    if add_result.returncode != 0:
+        raise RuntimeError(add_result.stderr or add_result.stdout)
+
+    commit_message = f"Update actions project data {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    commit_result = run_git_command(["commit", "-m", commit_message])
+    if commit_result.returncode != 0:
+        output = f"{commit_result.stdout}\n{commit_result.stderr}".strip()
+        if "nothing to commit" not in output:
+            raise RuntimeError(output)
+
+    push_result = run_git_command(["push"])
+    if push_result.returncode != 0:
+        raise RuntimeError(push_result.stderr or push_result.stdout)
+
+    return "已同步到 GitHub，云端每日推送会使用最新项目数据。"
 
 
 def table_height(row_count: int, min_height: int = 260, max_height: int = 720) -> int:
@@ -489,13 +537,20 @@ def show_export_page():
 
     st.divider()
     st.subheader("GitHub Actions 数据")
-    st.write("本地项目有修改后，点击这里生成云端每日推送使用的数据文件。")
+    st.write("本地项目有修改后，点击这里同步到 GitHub。云端每日推送会读取同步后的数据。")
     if st.button("生成 GitHub Actions 数据文件", type="primary"):
         try:
             export_actions_data()
             st.success("已生成 data/projects_for_actions.json。提交并推送到 GitHub 后，云端定时推送会使用最新数据。")
         except Exception as exc:
             st.error(f"生成失败：{exc}")
+
+    if st.button("一键同步到 GitHub"):
+        try:
+            result = sync_actions_data_to_github()
+            st.success(result)
+        except Exception as exc:
+            st.error(f"同步失败：{exc}")
 
 
 def main():
