@@ -87,6 +87,24 @@ def concise_risk(row: dict) -> str:
     return "按节点推进"
 
 
+def urge_owner_for_stage(row: dict) -> str:
+    """根据当前节点给出更贴近实际协作对象的催办人。"""
+    stage = row.get("stage", "")
+    if stage == "超期":
+        return "项目负责人 / 制片 / 承制方"
+    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+        return "制片 / 审核负责人 / 承制方"
+    if row.get("is_first_episode") or "首集" in stage:
+        return "导演 / 剪辑 / 承制方"
+    if row.get("is_asset") or "资产" in stage:
+        return "制片 / 版权 / 资产负责人"
+    if row.get("is_batch") or "一卡前" in stage or "2-10" in stage or "全集" in stage or "制作" in stage:
+        return "承制方 / 制片"
+    if "未开始" in stage or "等待" in stage:
+        return "项目负责人 / 制片"
+    return row.get("urge") or "项目负责人 / 制片"
+
+
 def calculate_importance(info: dict) -> int:
     """数字越小越重要，飞书和首页都按这个排序。"""
     if info.get("stage") == "超期":
@@ -286,7 +304,7 @@ def build_today_rows(today=None) -> list[dict]:
                 "stage": info["stage"],
                 "task": info["task"],
                 "today_focus": "",
-                "urge": "承制方",
+                "urge": info.get("urge", ""),
                 "risk": info["risk"],
                 "risk_brief": "",
                 "status": project["status"],
@@ -296,8 +314,11 @@ def build_today_rows(today=None) -> list[dict]:
                 "is_delivery": info.get("is_delivery", False),
                 "is_first_episode": info.get("is_first_episode", False),
                 "is_due_today": info.get("is_due_today", False),
+                "is_batch": info.get("is_batch", False),
+                "is_asset": info.get("is_asset", False),
             }
         )
+        rows[-1]["urge"] = urge_owner_for_stage(rows[-1])
         rows[-1]["today_focus"] = concise_task(rows[-1])
         rows[-1]["risk_brief"] = concise_risk(rows[-1])
     return sorted(rows, key=reminder_sort_key)
@@ -334,7 +355,7 @@ def build_feishu_message(today=None) -> str:
                 f"{row['priority_label']}《{row['display_name']}》",
                 f"阶段：{row['stage']}｜交付：{row['delivery_countdown']}",
                 f"今天重点：{row['today_focus']}",
-                "催：承制方",
+                f"催：{row['urge']}",
                 f"风险：{row['risk_brief']}",
             ]
         )
