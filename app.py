@@ -1,8 +1,12 @@
-from datetime import date, datetime
+﻿from datetime import date, datetime
 from io import BytesIO
+from datetime import time, timedelta
+import base64
+import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 import pandas as pd
 import streamlit as st
@@ -29,22 +33,37 @@ from project_parser import parse_chinese_schedule_text
 from scheduler import (
     build_feishu_message,
     build_today_rows,
+    get_reminder_times,
     send_daily_reminder,
     send_test_message,
     start_scheduler,
-    update_reminder_time,
+    update_reminder_times,
 )
 from scripts.export_actions_data import export_actions_data
 
 
 STATUS_OPTIONS = ["进行中", "已交付", "延期", "暂停"]
 LEVEL_OPTIONS = ["自定义", "S级", "A级", "B级"]
+GITHUB_REPOSITORY = "1321769104lp/sop"
+WORKFLOW_PATH = ".github/workflows/daily-feishu-reminder.yml"
 
 
 def find_git_executable() -> str:
     """寻找可用的 Git。"""
     bundled_git = r"C:\Users\zy-user\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd\git.exe"
     return shutil.which("git") or bundled_git
+
+
+def find_gh_executable() -> str:
+    """寻找 GitHub CLI。"""
+    local_gh = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "tools",
+        "gh",
+        "bin",
+        "gh.exe",
+    )
+    return shutil.which("gh") or local_gh
 
 
 def run_git_command(args: list[str]) -> subprocess.CompletedProcess:
@@ -87,6 +106,152 @@ def sync_actions_data_to_github() -> str:
     return "已同步到 GitHub，云端每日推送会使用最新项目数据。"
 
 
+def beijing_time_to_utc_cron(reminder_time: str) -> tuple[int, int]:
+    """把北京时间 HH:MM 转成 GitHub Actions 使用的 UTC cron。"""
+    hour_text, minute_text = reminder_time.split(":")
+    local_dt = datetime.combine(date.today(), time(int(hour_text), int(minute_text)))
+    utc_dt = local_dt - timedelta(hours=8)
+    return utc_dt.minute, utc_dt.hour
+
+
+def build_workflow_content(reminder_times: list[str]) -> str:
+    """根据本地推送时间生成 GitHub Actions 定时文件。"""
+    schedule_lines = []
+    for reminder_time in reminder_times:
+        minute, hour = beijing_time_to_utc_cron(reminder_time)
+        schedule_lines.extend(
+            [
+                f"    # GitHub Actions uses UTC. Beijing time {reminder_time} = UTC {hour:02d}:{minute:02d}.",
+                f'    - cron: "{minute} {hour} * * *"',
+            ]
+        )
+
+    return "\n".join(
+        [
+            "name: Daily Feishu Reminder",
+            "",
+            "on:",
+            "  schedule:",
+            *schedule_lines,
+            "  workflow_dispatch:",
+            "",
+            "jobs:",
+            "  send-reminder:",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - name: Checkout repository",
+            "        uses: actions/checkout@v4",
+            "",
+            "      - name: Setup Python",
+            "        uses: actions/setup-python@v5",
+            "        with:",
+            '          python-version: "3.11"',
+            "",
+            "      - name: Install dependencies",
+            "        run: pip install -r requirements-actions.txt",
+            "",
+            "      - name: Send Feishu reminder",
+            "        env:",
+            "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}",
+            "          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}",
+            "        run: python scripts/send_github_reminder.py",
+            "",
+        ]
+    )
+
+
+def run_gh_api(args: list[str], payload: dict | None = None) -> subprocess.CompletedProcess:
+    """执行 GitHub CLI API 请求。"""
+    gh_exe = find_gh_executable()
+    if not os.path.exists(gh_exe) and not shutil.which(gh_exe):
+        raise RuntimeError("没有找到 GitHub CLI。请先安装或登录 gh。")
+
+    command = [gh_exe, "api", *args]
+    temp_path = None
+    try:
+        if payload is not None:
+            fd, temp_path = tempfile.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            command.extend(["--input", temp_path])
+
+        return subprocess.run(
+            command,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def update_github_text_file(path: str, content: str, message: str) -> str:
+    """通过 GitHub API 更新远端文本文件。"""
+    api_path = path.replace("\\", "/")
+    sha_result = run_gh_api(
+        [
+            f"repos/{GITHUB_REPOSITORY}/contents/{api_path}",
+            "--jq",
+            ".sha",
+        ]
+    )
+    if sha_result.returncode != 0:
+        raise RuntimeError(sha_result.stderr or sha_result.stdout)
+
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "sha": sha_result.stdout.strip(),
+        "branch": "main",
+    }
+    update_result = run_gh_api(
+        [
+            f"repos/{GITHUB_REPOSITORY}/contents/{api_path}",
+            "--method",
+            "PUT",
+            "--jq",
+            ".commit.sha",
+        ],
+        payload=payload,
+    )
+    if update_result.returncode != 0:
+        raise RuntimeError(update_result.stderr or update_result.stdout)
+    return update_result.stdout.strip()
+
+
+def sync_everything_to_github() -> str:
+    """同步本地项目数据和本地推送时间到 GitHub 云端。"""
+    export_actions_data()
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+    workflow_content = build_workflow_content(reminder_times)
+
+    workflow_full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), WORKFLOW_PATH)
+    with open(workflow_full_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(workflow_content)
+
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "projects_for_actions.json")
+    with open(data_path, "r", encoding="utf-8") as handle:
+        data_content = handle.read()
+
+    data_sha = update_github_text_file(
+        "data/projects_for_actions.json",
+        data_content,
+        "Sync local project data",
+    )
+    workflow_sha = update_github_text_file(
+        WORKFLOW_PATH,
+        workflow_content,
+        "Sync reminder schedule times",
+    )
+
+    return (
+        "已同步到 GitHub 云端：项目数据、推送时间和 GitHub Actions 定时配置都已更新。\n"
+        f"项目数据提交：{data_sha[:7]}；推送时间提交：{workflow_sha[:7]}。"
+    )
+
+
 def table_height(row_count: int, min_height: int = 260, max_height: int = 720) -> int:
     """根据行数给表格一个尽量够看的高度。"""
     return min(max_height, max(min_height, 90 + row_count * 44))
@@ -103,7 +268,7 @@ st.set_page_config(
 def bootstrap_app():
     """初始化数据库和后台定时任务。"""
     load_dotenv()
-    init_db(default_reminder_time=os.getenv("REMINDER_TIME", "10:00"))
+    init_db(default_reminder_time=os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
     seed_sample_data()
     return start_scheduler()
 
@@ -484,19 +649,26 @@ def show_feishu_page():
     load_dotenv()
     webhook_url = os.getenv("FEISHU_WEBHOOK_URL", "")
     secret = os.getenv("FEISHU_SECRET", "")
-    reminder_time = get_setting("reminder_time", os.getenv("REMINDER_TIME", "10:00"))
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
 
     st.write("Webhook URL：", "已配置" if webhook_url else "未配置")
     st.write("Secret：", "已配置" if secret else "未配置，可用于未开启签名的机器人")
     st.write("今日自动推送：", "已成功" if has_successful_auto_log() else "未看到成功记录")
 
-    new_time = st.text_input("每日推送时间", value=reminder_time, help="格式：HH:MM，例如 10:00")
+    st.subheader("本地推送时间")
+    st.caption("每行一个时间。本地后台会按这些时间推送；点左侧同步后，GitHub 云端也会使用同一组时间。")
+    new_times_text = st.text_area(
+        "每日推送时间",
+        value="\n".join(reminder_times),
+        height=112,
+        help="格式：HH:MM，每行一个，例如 09:57",
+    )
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("保存推送时间", type="primary"):
+        if st.button("保存本地推送时间", type="primary"):
             try:
-                update_reminder_time(new_time)
-                st.success("推送时间已保存。当前进程内的定时任务也已刷新。")
+                saved_times = update_reminder_times(new_times_text)
+                st.success(f"推送时间已保存：{', '.join(saved_times)}。当前进程内的定时任务也已刷新。")
             except Exception as exc:
                 st.error(f"保存失败：{exc}")
     with col2:
@@ -506,6 +678,30 @@ def show_feishu_page():
                 st.success(f"测试消息已发送：{result}")
             except Exception as exc:
                 st.error(f"发送失败：{exc}")
+
+    add_col1, add_col2 = st.columns([1, 2])
+    with add_col1:
+        added_time = st.time_input("新增推送时间", value=time(18, 0), step=300)
+    with add_col2:
+        st.write("")
+        st.write("")
+        if st.button("新增到本地时间列表"):
+            try:
+                added_value = added_time.strftime("%H:%M")
+                saved_times = update_reminder_times([*reminder_times, added_value])
+                st.success(f"已新增：{added_value}。当前推送时间：{', '.join(saved_times)}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"新增失败：{exc}")
+
+    st.divider()
+    if st.button("同步这些设置到 GitHub 云端", type="primary"):
+        try:
+            saved_times = update_reminder_times(new_times_text)
+            result = sync_everything_to_github()
+            st.success(f"本地时间已保存：{', '.join(saved_times)}。\n{result}")
+        except Exception as exc:
+            st.error(f"同步失败：{exc}")
 
     st.divider()
     if st.button("立即发送今日提醒"):
@@ -580,8 +776,8 @@ def show_export_page():
     )
 
     st.divider()
-    st.subheader("GitHub Actions 数据")
-    st.write("本地项目有修改后，点击这里同步到 GitHub。云端每日推送会读取同步后的数据。")
+    st.subheader("GitHub 云端同步")
+    st.write("本地项目、推送时间有修改后，点击这里同步到 GitHub。云端每日推送会读取同步后的数据和时间。")
     if st.button("生成 GitHub Actions 数据文件", type="primary"):
         try:
             export_actions_data()
@@ -589,9 +785,9 @@ def show_export_page():
         except Exception as exc:
             st.error(f"生成失败：{exc}")
 
-    if st.button("一键同步到 GitHub"):
+    if st.button("同步全部到 GitHub 云端"):
         try:
-            result = sync_actions_data_to_github()
+            result = sync_everything_to_github()
             st.success(result)
         except Exception as exc:
             st.error(f"同步失败：{exc}")
@@ -601,6 +797,15 @@ def main():
     bootstrap_app()
 
     st.sidebar.title("短剧SOP")
+    if st.sidebar.button("⏻ 同步 GitHub 云端", type="primary", use_container_width=True):
+        try:
+            result = sync_everything_to_github()
+            st.sidebar.success(result)
+        except Exception as exc:
+            st.sidebar.error(f"同步失败：{exc}")
+    st.sidebar.caption("本地项目、推送时间、云端定时一起同步。")
+    st.sidebar.divider()
+
     page = st.sidebar.radio(
         "后台页面",
         [
