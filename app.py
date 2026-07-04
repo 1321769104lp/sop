@@ -1116,11 +1116,11 @@ def show_feishu_page():
         st.dataframe(log_df[display_cols], use_container_width=True, hide_index=True)
 
 
-def show_import_page():
-    st.title("Excel 导入")
+def render_excel_import_section():
+    st.subheader("Excel 导入")
     st.write("支持列名：项目名、开始制作日期、集数、项目等级、负责人、当前状态、备注。")
-    file = st.file_uploader("上传 Excel 文件", type=["xlsx", "xls"])
-    if file and st.button("开始导入", type="primary"):
+    file = st.file_uploader("上传 Excel 文件", type=["xlsx", "xls"], key="data_import_file")
+    if file and st.button("开始导入", type="primary", key="data_import_submit"):
         try:
             count = import_projects_from_excel(file)
             st.success(f"导入完成，共新增 {count} 个项目。")
@@ -1129,8 +1129,8 @@ def show_import_page():
             st.error(f"导入失败：{exc}")
 
 
-def show_export_page():
-    st.title("Excel 导出")
+def render_excel_export_section():
+    st.subheader("Excel 导出")
     df = projects_to_dataframe()
     display_df = df.copy()
     if "ID" in display_df.columns:
@@ -1159,24 +1159,58 @@ def show_export_page():
         data=output,
         file_name=f"短剧SOP项目列表_{date.today().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="data_export_download",
     )
 
-    st.divider()
+
+def render_cloud_sync_section():
     st.subheader("GitHub 云端同步")
     st.write("本地项目、推送时间有修改后，点击这里同步到 GitHub。云端每日推送会读取同步后的数据和时间。")
-    if st.button("生成 GitHub Actions 数据文件", type="primary"):
+    if st.button("生成 GitHub Actions 数据文件", type="primary", key="data_generate_actions"):
         try:
             export_actions_data()
             st.success("已生成 data/projects_for_actions.json。提交并推送到 GitHub 后，云端定时推送会使用最新数据。")
         except Exception as exc:
             st.error(f"生成失败：{exc}")
 
-    if st.button("同步全部到 GitHub 云端"):
+    if st.button("同步全部到 GitHub 云端", key="data_sync_all"):
         try:
             result = sync_everything_to_github()
             st.success(result)
         except Exception as exc:
             st.error(f"同步失败：{exc}")
+
+
+def show_data_management_page():
+    st.title("数据管理")
+    total_projects = len(list_projects(include_delivered=True))
+    active_projects = len(list_projects(include_delivered=False))
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("全部项目", f"{total_projects} 个")
+    metric_cols[1].metric("提醒中", f"{active_projects} 个")
+    metric_cols[2].metric("每日推送", " / ".join(reminder_times))
+
+    import_tab, export_tab, sync_tab = st.tabs(["导入 Excel", "导出 Excel", "云端同步"])
+    with import_tab:
+        render_excel_import_section()
+    with export_tab:
+        render_excel_export_section()
+    with sync_tab:
+        render_cloud_sync_section()
+
+
+def show_import_page():
+    st.title("Excel 导入")
+    render_excel_import_section()
+
+
+def show_export_page():
+    st.title("Excel 导出")
+    render_excel_export_section()
+    st.divider()
+    render_cloud_sync_section()
 
 
 def main():
@@ -1200,8 +1234,7 @@ def main():
             "交付确认",
             "项目工作台",
             "飞书配置测试",
-            "Excel 导入",
-            "Excel 导出",
+            "数据管理",
         ],
     )
 
@@ -1215,10 +1248,8 @@ def main():
         show_project_workbench_page()
     elif page == "飞书配置测试":
         show_feishu_page()
-    elif page == "Excel 导入":
-        show_import_page()
-    elif page == "Excel 导出":
-        show_export_page()
+    elif page == "数据管理":
+        show_data_management_page()
 
 
 if __name__ == "__main__":
