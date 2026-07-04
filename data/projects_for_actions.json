@@ -2,110 +2,146 @@
   "version": 1,
   "projects": [
     {
-      "project_name": "我的女友是女巫",
-      "start_date": "2026-07-03",
-      "episodes": 30,
-      "project_level": "B级",
-      "owner": "",
-      "status": "进行中",
-      "remark": "按等级和交付时间自动倒推：\n资产确定（3天）：2026-07-05\n首集制作与修改（1天）：2026-07-06\n2-10集制作（2天）：2026-07-08\n全集制作（2天）：2026-07-10\n终审与交付（2天）：2026-07-12",
-      "milestones": [
-        {
-          "name": "资产确定",
-          "duration": 3,
-          "due_date": "2026-07-05"
-        },
-        {
-          "name": "首集制作与修改",
-          "duration": 1,
-          "due_date": "2026-07-06"
-        },
-        {
-          "name": "2-10集制作",
-          "duration": 2,
-          "due_date": "2026-07-08"
-        },
-        {
-          "name": "全集制作",
-          "duration": 2,
-          "due_date": "2026-07-10"
-        },
-        {
-          "name": "终审与交付",
-          "duration": 2,
-          "due_date": "2026-07-12"
-        }
-      ]
-    },
-    {
-      "project_name": "爹地，拉过的钩不许变+Daddy, Pinky Promise（L组-盼趣-A本）",
-      "start_date": "2026-06-29",
+      "project_name": "我带双宝被狼人首富宠上天（自制自闭环节项目-只需要推进度和交付即可）",
+      "start_date": "2026-06-28",
       "episodes": 30,
       "project_level": "自定义",
       "owner": "",
       "status": "进行中",
-      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-07-01\n首集制作与修改（2天）：2026-07-03\n一卡前制作（3天）：2026-07-06\n全集制作（10天）：2026-07-16\n终审与交付（2天）：2026-07-18",
+      "remark": "按修改后的交付日期重算节点：\n资产确定（3天）：2026-06-30\n首集制作与修改（1天）：2026-07-01\n2-10集制作（2天）：2026-07-03\n全集制作（2天）：2026-07-05\n终审与交付（2天）：2026-07-07",
       "milestones": [
         {
           "name": "资产确定",
           "duration": 3,
-          "due_date": "2026-07-01"
+          "due_date": "2026-06-30"
         },
         {
           "name": "首集制作与修改",
+          "duration": 1,
+          "due_date": "2026-07-01"
+        },
+        {
+          "name": "2-10集制作",
           "duration": 2,
           "due_date": "2026-07-03"
         },
         {
-          "name": "一卡前制作",
-          "duration": 3,
-          "due_date": "2026-07-06"
-        },
-        {
           "name": "全集制作",
-          "duration": 10,
-          "due_date": "2026-07-16"
+          "duration": 2,
+          "due_date": "2026-07-05"
         },
         {
           "name": "终审与交付",
           "duration": 2,
-          "due_date": "2026-07-18"
+          "due_date": "2026-07-07"
         }
       ]
     },
     {
       "project_name": "狼王的修女（M组（我们目前所在的组）-真人剧B本）",
-      "start_date": "2026-06-29",
+      "start_date": "2026-06-28",
       "episodes": 30,
       "project_level": "自定义",
       "owner": "",
       "status": "进行中",
-      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-07-01\n首集制作与修改（1天）：2026-07-02\n2-10集制作（2天）：2026-07-04\n全集制作（2天）：2026-07-06\n终审与交付（2天）：2026-07-08",
+      "remark": "按修改后的交付日期重算节点：\n资产确定（3天）：2026-06-30\n首集制作与修改（1天）：2026-07-01\n2-10集制作（2天）：2026-07-03\n全集制作（2天）：2026-07-05\n终审与交付（2天）：2026-07-07",
       "milestones": [
         {
           "name": "资产确定",
           "duration": 3,
-          "due_date": "2026-07-01"
+          "due_date": "2026-06-30"
         },
         {
           "name": "首集制作与修改",
           "duration": 1,
-          "due_date": "2026-07-02"
+          "due_date": "2026-07-01"
         },
         {
           "name": "2-10集制作",
           "duration": 2,
-          "due_date": "2026-07-04"
+          "due_date": "2026-07-03"
         },
         {
           "name": "全集制作",
           "duration": 2,
-          "due_date": "2026-07-06"
+          "due_date": "2026-07-05"
         },
         {
           "name": "终审与交付",
           "duration": 2,
-          "due_date": "2026-07-08"
+          "due_date": "2026-07-07"
+        }
+      ]
+    },
+    {
+      "project_name": "我的女友是女巫",
+      "start_date": "2026-06-28",
+      "episodes": 30,
+      "project_level": "B级",
+      "owner": "",
+      "status": "进行中",
+      "remark": "按修改后的交付日期重算节点：\n资产确定（3天）：2026-06-30\n首集制作与修改（1天）：2026-07-01\n2-10集制作（2天）：2026-07-03\n全集制作（2天）：2026-07-05\n终审与交付（2天）：2026-07-07",
+      "milestones": [
+        {
+          "name": "资产确定",
+          "duration": 3,
+          "due_date": "2026-06-30"
+        },
+        {
+          "name": "首集制作与修改",
+          "duration": 1,
+          "due_date": "2026-07-01"
+        },
+        {
+          "name": "2-10集制作",
+          "duration": 2,
+          "due_date": "2026-07-03"
+        },
+        {
+          "name": "全集制作",
+          "duration": 2,
+          "due_date": "2026-07-05"
+        },
+        {
+          "name": "终审与交付",
+          "duration": 2,
+          "due_date": "2026-07-07"
+        }
+      ]
+    },
+    {
+      "project_name": "一夜情后，我怀上龙宝",
+      "start_date": "2026-06-27",
+      "episodes": 30,
+      "project_level": "B级",
+      "owner": "",
+      "status": "进行中",
+      "remark": "按等级和交付时间自动倒推：\n资产确定（3天）：2026-06-29\n首集制作与修改（1天）：2026-06-30\n2-10集制作（2天）：2026-07-02\n全集制作（2天）：2026-07-04\n终审与交付（2天）：2026-07-06",
+      "milestones": [
+        {
+          "name": "资产确定",
+          "duration": 3,
+          "due_date": "2026-06-29"
+        },
+        {
+          "name": "首集制作与修改",
+          "duration": 1,
+          "due_date": "2026-06-30"
+        },
+        {
+          "name": "2-10集制作",
+          "duration": 2,
+          "due_date": "2026-07-02"
+        },
+        {
+          "name": "全集制作",
+          "duration": 2,
+          "due_date": "2026-07-04"
+        },
+        {
+          "name": "终审与交付",
+          "duration": 2,
+          "due_date": "2026-07-06"
         }
       ]
     },
@@ -146,42 +182,6 @@
       ]
     },
     {
-      "project_name": "我带双宝被狼人首富宠上天（自制自闭环节项目-只需要推进度和交付即可）",
-      "start_date": "2026-06-25",
-      "episodes": 30,
-      "project_level": "自定义",
-      "owner": "",
-      "status": "进行中",
-      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-06-27\n首集制作与修改（1天）：2026-06-28\n2-10集制作（2天）：2026-06-30\n全集制作（2天）：2026-07-02\n终审与交付（2天）：2026-07-04",
-      "milestones": [
-        {
-          "name": "资产确定",
-          "duration": 3,
-          "due_date": "2026-06-27"
-        },
-        {
-          "name": "首集制作与修改",
-          "duration": 1,
-          "due_date": "2026-06-28"
-        },
-        {
-          "name": "2-10集制作",
-          "duration": 2,
-          "due_date": "2026-06-30"
-        },
-        {
-          "name": "全集制作",
-          "duration": 2,
-          "due_date": "2026-07-02"
-        },
-        {
-          "name": "终审与交付",
-          "duration": 2,
-          "due_date": "2026-07-04"
-        }
-      ]
-    },
-    {
       "project_name": "和我的爱葬身大海",
       "start_date": "2026-06-23",
       "episodes": 30,
@@ -214,42 +214,6 @@
           "name": "终审与交付",
           "duration": 2,
           "due_date": "2026-07-06"
-        }
-      ]
-    },
-    {
-      "project_name": "糟糕！小黄文落到了哥哥死党手里：Oops! My Brother's Best Friend Read My Dirty Secret（真人-盼趣）",
-      "start_date": "2026-06-22",
-      "episodes": 30,
-      "project_level": "自定义",
-      "owner": "",
-      "status": "进行中",
-      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-06-24\n首集制作与修改（2天）：2026-06-26\n一卡前制作（3天）：2026-06-29\n全集制作（10天）：2026-07-09\n终审与交付（2天）：2026-07-11",
-      "milestones": [
-        {
-          "name": "资产确定",
-          "duration": 3,
-          "due_date": "2026-06-24"
-        },
-        {
-          "name": "首集制作与修改",
-          "duration": 2,
-          "due_date": "2026-06-26"
-        },
-        {
-          "name": "一卡前制作",
-          "duration": 3,
-          "due_date": "2026-06-29"
-        },
-        {
-          "name": "全集制作",
-          "duration": 10,
-          "due_date": "2026-07-09"
-        },
-        {
-          "name": "终审与交付",
-          "duration": 2,
-          "due_date": "2026-07-11"
         }
       ]
     },
@@ -290,7 +254,115 @@
       ]
     },
     {
-      "project_name": "我已不需要你的忏悔：No More Need for Your Sorry（动态漫-A)",
+      "project_name": "糟糕！小黄文落到了哥哥死党手里：Oops! My Brother's Best Friend Read My Dirty Secret（真人-盼趣）",
+      "start_date": "2026-06-22",
+      "episodes": 30,
+      "project_level": "自定义",
+      "owner": "",
+      "status": "进行中",
+      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-06-24\n首集制作与修改（2天）：2026-06-26\n一卡前制作（3天）：2026-06-29\n全集制作（10天）：2026-07-09\n终审与交付（2天）：2026-07-11",
+      "milestones": [
+        {
+          "name": "资产确定",
+          "duration": 3,
+          "due_date": "2026-06-24"
+        },
+        {
+          "name": "首集制作与修改",
+          "duration": 2,
+          "due_date": "2026-06-26"
+        },
+        {
+          "name": "一卡前制作",
+          "duration": 3,
+          "due_date": "2026-06-29"
+        },
+        {
+          "name": "全集制作",
+          "duration": 10,
+          "due_date": "2026-07-09"
+        },
+        {
+          "name": "终审与交付",
+          "duration": 2,
+          "due_date": "2026-07-11"
+        }
+      ]
+    },
+    {
+      "project_name": "爹地，拉过的钩不许变+Daddy, Pinky Promise（L组-盼趣-A本）",
+      "start_date": "2026-06-18",
+      "episodes": 30,
+      "project_level": "自定义",
+      "owner": "",
+      "status": "进行中",
+      "remark": "按修改后的交付日期重算节点：\n资产确定（3天）：2026-06-20\n首集制作与修改（2天）：2026-06-22\n一卡前制作（3天）：2026-06-25\n全集制作（10天）：2026-07-05\n终审与交付（2天）：2026-07-07",
+      "milestones": [
+        {
+          "name": "资产确定",
+          "duration": 3,
+          "due_date": "2026-06-20"
+        },
+        {
+          "name": "首集制作与修改",
+          "duration": 2,
+          "due_date": "2026-06-22"
+        },
+        {
+          "name": "一卡前制作",
+          "duration": 3,
+          "due_date": "2026-06-25"
+        },
+        {
+          "name": "全集制作",
+          "duration": 10,
+          "due_date": "2026-07-05"
+        },
+        {
+          "name": "终审与交付",
+          "duration": 2,
+          "due_date": "2026-07-07"
+        }
+      ]
+    },
+    {
+      "project_name": "我的妈咪是冰雪女王：My Mom Is the Ice Queen",
+      "start_date": "2026-06-17",
+      "episodes": 30,
+      "project_level": "自定义",
+      "owner": "",
+      "status": "进行中",
+      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-06-19\n首集制作与修改（2天）：2026-06-21\n一卡前制作（5天）：2026-06-26\n全集制作（16天）：2026-07-12\n终审与交付（2天）：2026-07-14",
+      "milestones": [
+        {
+          "name": "资产确定",
+          "duration": 3,
+          "due_date": "2026-06-19"
+        },
+        {
+          "name": "首集制作与修改",
+          "duration": 2,
+          "due_date": "2026-06-21"
+        },
+        {
+          "name": "一卡前制作",
+          "duration": 5,
+          "due_date": "2026-06-26"
+        },
+        {
+          "name": "全集制作",
+          "duration": 16,
+          "due_date": "2026-07-12"
+        },
+        {
+          "name": "终审与交付",
+          "duration": 2,
+          "due_date": "2026-07-14"
+        }
+      ]
+    },
+    {
+      "project_name": "Mother of Dragons（龙之母）（重点推进项目）",
       "start_date": "2026-06-17",
       "episodes": 30,
       "project_level": "自定义",
@@ -362,7 +434,7 @@
       ]
     },
     {
-      "project_name": "Mother of Dragons（龙之母）（重点推进项目）",
+      "project_name": "我已不需要你的忏悔：No More Need for Your Sorry（动态漫-A)",
       "start_date": "2026-06-17",
       "episodes": 30,
       "project_level": "自定义",
@@ -394,42 +466,6 @@
           "name": "终审与交付",
           "duration": 2,
           "due_date": "2026-07-06"
-        }
-      ]
-    },
-    {
-      "project_name": "我的妈咪是冰雪女王：My Mom Is the Ice Queen",
-      "start_date": "2026-06-17",
-      "episodes": 30,
-      "project_level": "自定义",
-      "owner": "",
-      "status": "进行中",
-      "remark": "自动识别自制作时间节点：\n资产确定（3天）：2026-06-19\n首集制作与修改（2天）：2026-06-21\n一卡前制作（5天）：2026-06-26\n全集制作（16天）：2026-07-12\n终审与交付（2天）：2026-07-14",
-      "milestones": [
-        {
-          "name": "资产确定",
-          "duration": 3,
-          "due_date": "2026-06-19"
-        },
-        {
-          "name": "首集制作与修改",
-          "duration": 2,
-          "due_date": "2026-06-21"
-        },
-        {
-          "name": "一卡前制作",
-          "duration": 5,
-          "due_date": "2026-06-26"
-        },
-        {
-          "name": "全集制作",
-          "duration": 16,
-          "due_date": "2026-07-12"
-        },
-        {
-          "name": "终审与交付",
-          "duration": 2,
-          "due_date": "2026-07-14"
         }
       ]
     },
