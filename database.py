@@ -86,6 +86,10 @@ def init_db(default_reminder_time: str = "10:00"):
             "INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_time', ?)",
             (default_reminder_time,),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', ?)",
+            (default_reminder_time,),
+        )
         conn.commit()
 
 
