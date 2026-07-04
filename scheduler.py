@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,6 +16,15 @@ from database import (
 )
 from feishu import send_feishu_message
 from sop import get_sop_info, production_day
+from delivery_rules import (
+    apply_delivery_state,
+    cycle_days_for_level,
+    delivery_label,
+    format_delivery_countdown,
+    format_summary_line,
+    summarize_rows,
+)
+from utils_time import now_beijing, today_beijing
 
 
 _scheduler = None
@@ -65,7 +74,7 @@ def delivery_countdown(delivery_date: str | None, today: date) -> str:
 def concise_task(row: dict) -> str:
     """把系统任务压缩成制片视角的短句。"""
     stage = row.get("stage", "")
-    if row.get("stage") == "超期":
+    if row.get("is_overdue"):
         return "确认交付状态或延期方案"
     if row.get("is_due_today"):
         return f"确认{stage}产出"
@@ -74,9 +83,9 @@ def concise_task(row: dict) -> str:
 
 def concise_risk(row: dict) -> str:
     """把风险压缩到一行。"""
-    if row.get("stage") == "超期":
+    if row.get("is_overdue"):
         return "已过交付日，需立即确认"
-    if row.get("is_delivery"):
+    if row.get("is_delivery_node"):
         return "交付节点，注意验收和上传"
     if row.get("is_first_episode"):
         return "首集方向会影响后续批量制作"
@@ -90,9 +99,9 @@ def concise_risk(row: dict) -> str:
 def urge_owner_for_stage(row: dict) -> str:
     """根据当前节点给出更贴近实际协作对象的催办人。"""
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "项目负责人 / 制片 / 承制方"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "制片 / 审核负责人 / 承制方"
     if row.get("is_first_episode") or "首集" in stage:
         return "导演 / 剪辑 / 承制方"
@@ -121,9 +130,9 @@ def delivery_delta(row: dict, today: date) -> int | None:
 def contractor_output(row: dict) -> str:
     """承制方这一侧要补的具体产出物。"""
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "补齐缺口产出"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "交付成片、工程文件和验收材料"
     if row.get("is_first_episode") or "首集" in stage:
         return "首集成片和修改反馈版"
@@ -139,9 +148,9 @@ def contractor_output(row: dict) -> str:
 def producer_action(row: dict) -> str:
     """制片这一侧要做的具体确认动作。"""
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "确认交付状态"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "确认验收、上传和交付状态"
     if row.get("is_first_episode") or "首集" in stage:
         return "确认首集方向和修改意见"
@@ -159,29 +168,27 @@ def build_project_reminder_lines(row: dict, today: date) -> list[str]:
     level = row.get("project_level") or "自定义"
     day = row.get("day") or 0
     delivery_date = row.get("delivery_date") or "未配置"
-    delta = delivery_delta(row, today)
-    overdue = row.get("stage") == "超期" or (delta is not None and delta < 0)
+    countdown = row.get("delivery_countdown") or format_delivery_countdown(row.get("delivery_remaining_days"))
+    overdue = row.get("is_overdue", False)
 
     if overdue:
-        over_days = abs(delta) if delta is not None else abs(int(row.get("days_to_due") or 0))
-        title = f"[超期]《{row['display_name']}》｜{level}第{day}天｜应交{delivery_date}｜已超{over_days}天"
+        title = f"[超期]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
         detail = "承制方：补齐缺口产出；制片：确认交付状态。"
         return [title, detail]
 
-    remain_days = delta if delta is not None else 0
     label = clean_priority_label(row.get("priority_label", "常规"))
-    title = f"[{label}]《{row['display_name']}》｜{level}第{day}天｜交付{delivery_date}｜剩{remain_days}天"
+    title = f"[{label}]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
     detail = f"承制方：{contractor_output(row)}；制片：{producer_action(row)}。"
     return [title, detail]
 
 
 def calculate_importance(info: dict) -> int:
     """数字越小越重要，飞书和首页都按这个排序。"""
-    if info.get("stage") == "超期":
+    if info.get("is_overdue"):
         return 1
-    if info.get("is_due_today"):
+    if info.get("is_delivery_node"):
         return 2
-    if info.get("is_delivery"):
+    if info.get("is_due_today"):
         return 3
     if info.get("is_first_episode"):
         return 4
@@ -196,14 +203,14 @@ def calculate_importance(info: dict) -> int:
 
 def build_priority_label(info: dict) -> str:
     """生成醒目的重点标签。"""
-    if info.get("stage") == "超期":
+    if info.get("is_overdue"):
         return "【重点｜超期】"
-    if info.get("is_due_today") and info.get("is_delivery"):
+    if info.get("delivery_remaining_days") == 0:
         return "【重点｜今日交付】"
+    if info.get("is_delivery_node"):
+        return "【交付风险】"
     if info.get("is_due_today"):
         return "【重点｜今日节点】"
-    if info.get("is_delivery"):
-        return "【交付】"
     if info.get("is_first_episode"):
         return "【首集】"
     if info.get("days_to_due") is not None and info["days_to_due"] <= 2:
@@ -230,7 +237,7 @@ def reminder_sort_key(row: dict) -> tuple:
 
 def build_custom_schedule_info(project: dict, milestones: list[dict], today=None) -> dict:
     """按项目自己的节点排期计算今日阶段。"""
-    today = today or date.today()
+    today = today or today_beijing()
     day = production_day(project["start_date"], today=today)
 
     normalized = []
@@ -344,34 +351,30 @@ def build_custom_schedule_info(project: dict, milestones: list[dict], today=None
 
 def build_today_rows(today=None) -> list[dict]:
     """生成今日推进表数据，已交付项目不展示。"""
+    today = today or today_beijing()
     rows = []
     for project in list_projects(include_delivered=False):
-        milestones = get_project_milestones(project["id"])
-        if milestones:
-            info = build_custom_schedule_info(project, milestones, today=today)
-        else:
-            # 没有结构化节点的旧项目，继续使用原来的 10 天 SOP 作为兜底。
-            info = get_sop_info(project["start_date"], today=today)
-            info["is_due_today"] = info["day"] in (4, 6, 8, 9, 10)
-            info["is_delivery"] = info["day"] in (9, 10) or info["stage"] == "超期"
-            info["is_first_episode"] = info["day"] == 4
-            info["is_batch"] = 5 <= info["day"] <= 8
-            info["is_asset"] = 1 <= info["day"] <= 3
-            info["days_to_due"] = max(0, 10 - info["day"]) if info["day"] > 0 else 999
-            start_date = date.fromisoformat(project["start_date"])
-            info["delivery_date"] = (start_date + timedelta(days=9)).strftime("%Y-%m-%d")
-            info["importance_rank"] = calculate_importance(info)
+        project_level = project.get("project_level") or "B级"
+        cycle_days = cycle_days_for_level(project_level)
+        info = get_sop_info(project["start_date"], today=today, project_level=project_level)
+        info = apply_delivery_state(info, project, today=today, cycle_days=cycle_days)
+        info["days_to_due"] = info.get("delivery_remaining_days")
+        info["importance_rank"] = calculate_importance(info)
 
         rows.append(
             {
                 "priority_label": build_priority_label(info),
                 "project_name": project["project_name"],
                 "display_name": chinese_project_name(project["project_name"]),
-                "project_level": project.get("project_level") or "自定义",
+                "project_level": project_level,
                 "start_date": project["start_date"],
                 "day": info["day"],
                 "delivery_date": info.get("delivery_date"),
-                "delivery_countdown": delivery_countdown(info.get("delivery_date"), today or date.today()),
+                "delivery_countdown": format_delivery_countdown(info.get("delivery_remaining_days")),
+                "delivery_remaining_days": info.get("delivery_remaining_days"),
+                "is_overdue": info.get("is_overdue", False),
+                "is_delivery_node": info.get("is_delivery_node", False),
+                "is_estimated_delivery": info.get("is_estimated_delivery", False),
                 "stage": info["stage"],
                 "task": info["task"],
                 "today_focus": "",
@@ -382,7 +385,7 @@ def build_today_rows(today=None) -> list[dict]:
                 "remark": project.get("remark", ""),
                 "importance_rank": info.get("importance_rank", 99),
                 "days_to_due": info.get("days_to_due"),
-                "is_delivery": info.get("is_delivery", False),
+                "is_delivery": info.get("is_delivery_node", False),
                 "is_first_episode": info.get("is_first_episode", False),
                 "is_due_today": info.get("is_due_today", False),
                 "is_batch": info.get("is_batch", False),
@@ -397,20 +400,13 @@ def build_today_rows(today=None) -> list[dict]:
 
 def build_feishu_message(today=None) -> str:
     """构造飞书每日提醒文本。"""
-    today = today or date.today()
+    today = today or today_beijing()
     rows = build_today_rows(today=today)
-    overdue_count = sum(1 for row in rows if row["stage"] == "超期")
-    delivery_count = sum(1 for row in rows if row.get("is_delivery"))
-    first_episode_count = sum(1 for row in rows if row.get("is_first_episode"))
+    summary = summarize_rows(rows)
 
     lines = [
-        "【今日短剧SOP推进提醒】",
-        "",
-        f"日期：{today.strftime('%Y-%m-%d')}",
-        f"进行中项目：{len(rows)} 个",
-        f"超期项目：{overdue_count} 个",
-        f"交付节点：{delivery_count} 个",
-        f"首集关键节点：{first_episode_count} 个",
+        f"【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】",
+        format_summary_line(summary),
         "",
         "━━━━━━━━━━━━━━",
     ]
@@ -537,7 +533,7 @@ def schedule_daily_jobs(scheduler: BackgroundScheduler, reminder_times: list[str
 
 def send_missed_today_reminder_if_needed(reminder_times: list[str]):
     """如果今天已过推送时间但没有自动成功记录，启动时补发一次。"""
-    now = datetime.now()
+    now = now_beijing()
     if has_successful_auto_log(now.strftime("%Y-%m-%d")):
         return
     for reminder_time in reminder_times:
