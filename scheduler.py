@@ -402,36 +402,81 @@ def parse_reminder_time(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def update_reminder_time(value: str):
-    """保存推送时间，并刷新当前进程里的定时任务。"""
-    parse_reminder_time(value)
-    set_setting("reminder_time", value)
+def parse_reminder_times(value: str | list[str]) -> list[str]:
+    """解析一个或多个 HH:MM 推送时间，去重并排序。"""
+    if isinstance(value, str):
+        raw_values = re.split(r"[,，\n\s]+", value)
+    else:
+        raw_values = value
+
+    times = []
+    seen = set()
+    for item in raw_values:
+        clean = str(item).strip()
+        if not clean:
+            continue
+        hour, minute = parse_reminder_time(clean)
+        normalized = f"{hour:02d}:{minute:02d}"
+        if normalized not in seen:
+            seen.add(normalized)
+            times.append(normalized)
+
+    if not times:
+        raise ValueError("至少需要一个推送时间。")
+    return sorted(times)
+
+
+def get_reminder_times(default: str = "09:57,16:00") -> list[str]:
+    """读取本地多个推送时间，兼容旧的单时间配置。"""
+    value = get_setting("reminder_times", "")
+    if not value:
+        value = get_setting("reminder_time", default)
+    return parse_reminder_times(value)
+
+
+def update_reminder_times(values: str | list[str]):
+    """保存多个推送时间，并刷新当前进程里的定时任务。"""
+    times = parse_reminder_times(values)
+    set_setting("reminder_times", ",".join(times))
+    set_setting("reminder_time", times[0])
     if _scheduler:
-        schedule_daily_job(_scheduler, value)
+        schedule_daily_jobs(_scheduler, times)
+    return times
 
 
-def schedule_daily_job(scheduler: BackgroundScheduler, reminder_time: str):
-    """注册或替换每日提醒任务。"""
-    hour, minute = parse_reminder_time(reminder_time)
-    scheduler.add_job(
-        send_daily_reminder,
-        CronTrigger(hour=hour, minute=minute),
-        id="daily_feishu_reminder",
-        replace_existing=True,
-        max_instances=1,
-    )
+def update_reminder_time(value: str):
+    """兼容旧调用：保存单个推送时间。"""
+    return update_reminder_times([value])
 
 
-def send_missed_today_reminder_if_needed(reminder_time: str):
+def schedule_daily_jobs(scheduler: BackgroundScheduler, reminder_times: list[str]):
+    """注册或替换多个每日提醒任务。"""
+    for job in list(scheduler.get_jobs()):
+        if job.id.startswith("daily_feishu_reminder"):
+            scheduler.remove_job(job.id)
+
+    for index, reminder_time in enumerate(reminder_times):
+        hour, minute = parse_reminder_time(reminder_time)
+        scheduler.add_job(
+            send_daily_reminder,
+            CronTrigger(hour=hour, minute=minute),
+            id=f"daily_feishu_reminder_{index}",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+
+def send_missed_today_reminder_if_needed(reminder_times: list[str]):
     """如果今天已过推送时间但没有自动成功记录，启动时补发一次。"""
-    hour, minute = parse_reminder_time(reminder_time)
     now = datetime.now()
-    scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now <= scheduled_at:
-        return
     if has_successful_auto_log(now.strftime("%Y-%m-%d")):
         return
-    send_daily_reminder(send_type="catchup")
+    for reminder_time in reminder_times:
+        hour, minute = parse_reminder_time(reminder_time)
+        scheduled_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now > scheduled_at:
+            send_daily_reminder(send_type="catchup")
+            return
 
 
 def start_scheduler():
@@ -440,12 +485,12 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return _scheduler
 
-    reminder_time = get_setting("reminder_time", os.getenv("REMINDER_TIME", "10:00"))
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
     _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    schedule_daily_job(_scheduler, reminder_time)
+    schedule_daily_jobs(_scheduler, reminder_times)
     _scheduler.start()
     try:
-        send_missed_today_reminder_if_needed(reminder_time)
+        send_missed_today_reminder_if_needed(reminder_times)
     except Exception:
         # 补发失败已经写入日志，不能阻断后台启动。
         pass
