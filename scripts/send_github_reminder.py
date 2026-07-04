@@ -4,19 +4,29 @@ import hmac
 import json
 import os
 import re
+import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from delivery_rules import (
+    apply_delivery_state,
+    cycle_days_for_level,
+    delivery_label,
+    format_delivery_countdown,
+    format_summary_line,
+    summarize_rows,
+)
+from utils_time import today_beijing
+from sop import get_sop_info
+
 
 DATA_PATH = Path("data/projects_for_actions.json")
-BEIJING_TZ = timezone(timedelta(hours=8))
-
-
-def today_beijing() -> date:
-    return datetime.now(BEIJING_TZ).date()
 
 
 def production_day(start_date: str, today: date) -> int:
@@ -60,7 +70,7 @@ def delivery_countdown(delivery_date: str | None, today: date) -> str:
 
 def concise_task(row: dict) -> str:
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "确认交付状态或延期方案"
     if row.get("is_due_today"):
         return f"确认{stage}产出"
@@ -68,9 +78,9 @@ def concise_task(row: dict) -> str:
 
 
 def concise_risk(row: dict) -> str:
-    if row.get("stage") == "超期":
+    if row.get("is_overdue"):
         return "已过交付日，需立即确认"
-    if row.get("is_delivery"):
+    if row.get("is_delivery_node"):
         return "交付节点，注意验收和上传"
     if row.get("is_first_episode"):
         return "首集方向会影响后续批量制作"
@@ -83,9 +93,9 @@ def concise_risk(row: dict) -> str:
 
 def urge_owner_for_stage(row: dict) -> str:
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "项目负责人 / 制片 / 承制方"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "制片 / 审核负责人 / 承制方"
     if row.get("is_first_episode") or "首集" in stage:
         return "导演 / 剪辑 / 承制方"
@@ -111,9 +121,9 @@ def delivery_delta(row: dict, today: date) -> int | None:
 
 def contractor_output(row: dict) -> str:
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "补齐缺口产出"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "交付成片、工程文件和验收材料"
     if row.get("is_first_episode") or "首集" in stage:
         return "首集成片和修改反馈版"
@@ -128,9 +138,9 @@ def contractor_output(row: dict) -> str:
 
 def producer_action(row: dict) -> str:
     stage = row.get("stage", "")
-    if stage == "超期":
+    if row.get("is_overdue"):
         return "确认交付状态"
-    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+    if row.get("is_delivery_node") or "终审" in stage or "交付" in stage:
         return "确认验收、上传和交付状态"
     if row.get("is_first_episode") or "首集" in stage:
         return "确认首集方向和修改意见"
@@ -147,18 +157,16 @@ def build_project_reminder_lines(row: dict, today: date) -> list[str]:
     level = row.get("project_level") or "自定义"
     day = row.get("day") or 0
     delivery_date = row.get("delivery_date") or "未配置"
-    delta = delivery_delta(row, today)
-    overdue = row.get("stage") == "超期" or (delta is not None and delta < 0)
+    countdown = row.get("delivery_countdown") or format_delivery_countdown(row.get("delivery_remaining_days"))
+    overdue = row.get("is_overdue", False)
 
     if overdue:
-        over_days = abs(delta) if delta is not None else abs(int(row.get("days_to_due") or 0))
-        title = f"[超期]《{row['display_name']}》｜{level}第{day}天｜应交{delivery_date}｜已超{over_days}天"
+        title = f"[超期]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
         detail = "承制方：补齐缺口产出；制片：确认交付状态。"
         return [title, detail]
 
-    remain_days = delta if delta is not None else 0
     label = clean_priority_label(row.get("priority_label", "常规"))
-    title = f"[{label}]《{row['display_name']}》｜{level}第{day}天｜交付{delivery_date}｜剩{remain_days}天"
+    title = f"[{label}]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
     detail = f"承制方：{contractor_output(row)}；制片：{producer_action(row)}。"
     return [title, detail]
 
@@ -191,41 +199,39 @@ def send_feishu_message(webhook_url: str, secret: str, text: str) -> dict:
 
 
 def importance(info: dict) -> int:
-    if info["stage"] == "超期":
+    if info.get("is_overdue"):
         return 1
-    if info["is_due_today"] and info["is_delivery"]:
+    if info.get("is_delivery_node"):
         return 2
-    if info["is_due_today"]:
+    if info.get("is_due_today"):
         return 3
-    if info["is_delivery"]:
+    if info.get("is_first_episode"):
         return 4
-    if info["is_first_episode"]:
-        return 5
     if info["days_to_due"] is not None and info["days_to_due"] <= 2:
-        return 6
+        return 5
     if info["is_batch"]:
-        return 7
+        return 6
     if info["is_asset"]:
-        return 8
-    return 9
+        return 7
+    return 8
 
 
 def priority_label(info: dict) -> str:
-    if info["stage"] == "超期":
+    if info.get("is_overdue"):
         return "【重点｜超期】"
-    if info["is_due_today"] and info["is_delivery"]:
+    if info.get("delivery_remaining_days") == 0:
         return "【重点｜今日交付】"
-    if info["is_due_today"]:
+    if info.get("is_delivery_node"):
+        return "【交付风险】"
+    if info.get("is_due_today"):
         return "【重点｜今日节点】"
-    if info["is_delivery"]:
-        return "【交付】"
-    if info["is_first_episode"]:
+    if info.get("is_first_episode"):
         return "【首集】"
-    if info["days_to_due"] is not None and info["days_to_due"] <= 2:
+    if info.get("days_to_due") is not None and info["days_to_due"] <= 2:
         return "【临近节点】"
-    if info["is_batch"]:
+    if info.get("is_batch"):
         return "【批量制作】"
-    if info["is_asset"]:
+    if info.get("is_asset"):
         return "【资产】"
     return "【常规】"
 
@@ -351,6 +357,15 @@ def build_project_info(project: dict, today: date) -> dict:
     }
 
 
+def build_project_info(project: dict, today: date) -> dict:
+    project_level = project.get("project_level") or "B级"
+    cycle_days = cycle_days_for_level(project_level)
+    info = get_sop_info(project["start_date"], today=today, project_level=project_level)
+    info = apply_delivery_state(info, project, today=today, cycle_days=cycle_days)
+    info["days_to_due"] = info.get("delivery_remaining_days")
+    return info
+
+
 def build_rows(today: date) -> list[dict]:
     payload = json.loads(DATA_PATH.read_text(encoding="utf-8"))
     rows = []
@@ -369,7 +384,11 @@ def build_rows(today: date) -> list[dict]:
                 "project_level": project.get("project_level") or "自定义",
                 "start_date": project["start_date"],
                 "delivery_date": info.get("delivery_date"),
-                "delivery_countdown": delivery_countdown(info.get("delivery_date"), today),
+                "delivery_countdown": format_delivery_countdown(info.get("delivery_remaining_days")),
+                "delivery_remaining_days": info.get("delivery_remaining_days"),
+                "is_overdue": info.get("is_overdue", False),
+                "is_delivery_node": info.get("is_delivery_node", False),
+                "is_estimated_delivery": info.get("is_estimated_delivery", False),
                 "status": project.get("status", "进行中"),
             }
         )
@@ -389,18 +408,11 @@ def build_rows(today: date) -> list[dict]:
 
 def build_message(today: date) -> str:
     rows = build_rows(today)
-    overdue_count = sum(1 for row in rows if row["stage"] == "超期")
-    delivery_count = sum(1 for row in rows if row["is_delivery"])
-    first_episode_count = sum(1 for row in rows if row["is_first_episode"])
+    summary = summarize_rows(rows)
 
     lines = [
-        "【今日短剧SOP推进提醒】",
-        "",
-        f"日期：{today.strftime('%Y-%m-%d')}",
-        f"进行中项目：{len(rows)} 个",
-        f"超期项目：{overdue_count} 个",
-        f"交付节点：{delivery_count} 个",
-        f"首集关键节点：{first_episode_count} 个",
+        f"【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】",
+        format_summary_line(summary),
         "",
         "━━━━━━━━━━━━━━",
     ]
