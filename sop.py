@@ -1,6 +1,10 @@
 ﻿from datetime import date, datetime
 
 
+from delivery_rules import SOP_TEMPLATES
+from utils_time import today_beijing
+
+
 # SOP 规则集中放在这里，后续要改每天的任务，只需要改这个字典。
 SOP_RULES = {
     1: {
@@ -87,14 +91,16 @@ def parse_date(value) -> date:
 
 def production_day(start_date, today=None) -> int:
     """开始制作日期当天算第 1 天。"""
-    today = today or date.today()
+    today = today or today_beijing()
     start = parse_date(start_date)
     return (today - start).days + 1
 
 
-def get_sop_info(start_date, today=None) -> dict:
-    """根据开始日期计算今日 SOP 信息。"""
+def get_sop_info(start_date, today=None, project_level: str = "B级") -> dict:
+    """根据开始日期和 S/A/B 等级计算今日 SOP 信息。"""
+    today = today or today_beijing()
     day = production_day(start_date, today)
+    template = SOP_TEMPLATES.get(project_level) or SOP_TEMPLATES["B级"]
 
     if day <= 0:
         return {
@@ -104,21 +110,53 @@ def get_sop_info(start_date, today=None) -> dict:
             "urge": "负责人",
             "risk": "请确认项目是否提前启动。",
             "risk_level": 6,
+            "is_due_today": False,
+            "is_first_episode": False,
+            "is_batch": False,
+            "is_asset": False,
         }
 
-    if day >= 11:
-        return {
-            "day": day,
-            "stage": "超期",
-            "task": "标记为超期，提醒确认是否交付或延期。",
-            "urge": "制片 / 项目负责人 / 甲方确认人",
-            "risk": "项目已超过默认 10 天周期，请确认交付、延期或暂停。",
-            "risk_level": 1,
-        }
+    cursor = 1
+    for item in template:
+        duration = int(item["duration"])
+        end_day = cursor + duration - 1
+        if cursor <= day <= end_day:
+            stage = item["name"]
+            is_due_today = day == end_day
+            if is_due_today:
+                task = f"今日应完成“{stage}”。"
+                risk = f"今天是“{stage}”节点日，请确认产出和反馈。"
+                risk_level = 2
+            else:
+                task = f"推进“{stage}”，本阶段计划 {duration} 天。"
+                risk = f"距离“{stage}”节点日还有 {end_day - day} 天。"
+                risk_level = 3 if "首集" in stage else 5
+            return {
+                "day": day,
+                "stage": stage,
+                "task": task,
+                "urge": "承制方 / 制片",
+                "risk": risk,
+                "risk_level": risk_level,
+                "is_due_today": is_due_today,
+                "is_first_episode": "首集" in stage,
+                "is_batch": "全集" in stage or "一卡" in stage or "2-10" in stage or "制作" in stage,
+                "is_asset": "资产" in stage,
+            }
+        cursor = end_day + 1
 
-    info = SOP_RULES[day].copy()
-    info["day"] = day
-    return info
+    return {
+        "day": day,
+        "stage": "超出SOP周期",
+        "task": "已超过当前等级的 SOP 制作周期，请确认实际制作进度。",
+        "urge": "制片 / 项目负责人 / 承制方",
+        "risk": "制作周期已走完，交付风险仍以正式交付日期为准。",
+        "risk_level": 3,
+        "is_due_today": False,
+        "is_first_episode": False,
+        "is_batch": False,
+        "is_asset": False,
+    }
 
 
 def risk_sort_key(row: dict) -> tuple:
