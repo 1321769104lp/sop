@@ -19,6 +19,7 @@ def export_actions_data():
         item = {
             "project_name": project["project_name"],
             "start_date": project["start_date"],
+            "delivery_date": project.get("delivery_date") or "",
             "episodes": project.get("episodes") or 30,
             "project_level": project.get("project_level") or "自定义",
             "owner": project.get("owner") or "",
