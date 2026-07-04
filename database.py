@@ -1,9 +1,10 @@
 ﻿import sqlite3
-from datetime import datetime
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+
+from utils_time import now_beijing, today_beijing
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -13,6 +14,7 @@ DB_PATH = DATA_DIR / "sop_projects.db"
 PROJECT_COLUMNS = [
     "project_name",
     "start_date",
+    "delivery_date",
     "episodes",
     "project_level",
     "owner",
@@ -38,6 +40,7 @@ def init_db(default_reminder_time: str = "10:00"):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_name TEXT NOT NULL,
                 start_date TEXT NOT NULL,
+                delivery_date TEXT,
                 episodes INTEGER DEFAULT 30,
                 project_level TEXT DEFAULT '自定义',
                 owner TEXT,
@@ -48,6 +51,9 @@ def init_db(default_reminder_time: str = "10:00"):
             )
             """
         )
+        project_columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "delivery_date" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN delivery_date TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -90,11 +96,29 @@ def init_db(default_reminder_time: str = "10:00"):
             "INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', ?)",
             (default_reminder_time,),
         )
+        conn.execute(
+            """
+            UPDATE projects
+            SET delivery_date = (
+                SELECT due_date
+                FROM project_milestones
+                WHERE project_milestones.project_id = projects.id
+                ORDER BY sort_order DESC, due_date DESC
+                LIMIT 1
+            )
+            WHERE (delivery_date IS NULL OR delivery_date = '')
+              AND EXISTS (
+                SELECT 1
+                FROM project_milestones
+                WHERE project_milestones.project_id = projects.id
+            )
+            """
+        )
         conn.commit()
 
 
 def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return now_beijing().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def add_project(data: dict):
@@ -104,13 +128,14 @@ def add_project(data: dict):
         cursor = conn.execute(
             """
             INSERT INTO projects (
-                project_name, start_date, episodes, project_level, owner,
+                project_name, start_date, delivery_date, episodes, project_level, owner,
                 status, remark, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data.get("project_name"),
                 data.get("start_date"),
+                data.get("delivery_date") or "",
                 int(data.get("episodes") or 30),
                 data.get("project_level") or "自定义",
                 data.get("owner") or "",
@@ -189,13 +214,14 @@ def update_project(project_id: int, data: dict):
         conn.execute(
             """
             UPDATE projects
-            SET project_name=?, start_date=?, episodes=?, project_level=?,
+            SET project_name=?, start_date=?, delivery_date=?, episodes=?, project_level=?,
                 owner=?, status=?, remark=?, updated_at=?
             WHERE id=?
             """,
             (
                 data.get("project_name"),
                 data.get("start_date"),
+                data.get("delivery_date") or "",
                 int(data.get("episodes") or 30),
                 data.get("project_level") or "自定义",
                 data.get("owner") or "",
@@ -281,7 +307,7 @@ def add_notification_log(send_type: str, status: str, message: str = "", error: 
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                date.today().strftime("%Y-%m-%d"),
+                today_beijing().strftime("%Y-%m-%d"),
                 send_type,
                 status,
                 message[:1000],
@@ -308,7 +334,7 @@ def list_notification_logs(limit: int = 20) -> list[dict]:
 
 def has_successful_auto_log(send_date: str | None = None) -> bool:
     """判断某天是否已有自动推送或自动补发成功记录。"""
-    send_date = send_date or date.today().strftime("%Y-%m-%d")
+    send_date = send_date or today_beijing().strftime("%Y-%m-%d")
     with get_connection() as conn:
         row = conn.execute(
             """
@@ -328,6 +354,7 @@ def import_projects_from_excel(file) -> int:
         "项目名": "project_name",
         "开始制作日期": "start_date",
         "开始日期": "start_date",
+        "交付日期": "delivery_date",
         "集数": "episodes",
         "项目等级": "project_level",
         "负责人": "owner",
@@ -343,10 +370,14 @@ def import_projects_from_excel(file) -> int:
             continue
 
         start_date = pd.to_datetime(row.get("start_date")).strftime("%Y-%m-%d")
+        delivery_date = ""
+        if "delivery_date" in row and not pd.isna(row.get("delivery_date")):
+            delivery_date = pd.to_datetime(row.get("delivery_date")).strftime("%Y-%m-%d")
         add_project(
             {
                 "project_name": str(row.get("project_name")).strip(),
                 "start_date": start_date,
+                "delivery_date": delivery_date,
                 "episodes": int(row.get("episodes") or 30),
                 "project_level": str(row.get("project_level") or "自定义"),
                 "owner": str(row.get("owner") or ""),
@@ -363,12 +394,13 @@ def projects_to_dataframe() -> pd.DataFrame:
     rows = list_projects(include_delivered=True)
     df = pd.DataFrame(rows)
     if df.empty:
-        return pd.DataFrame(columns=["项目名", "开始制作日期", "集数", "项目等级", "负责人", "当前状态", "备注"])
+        return pd.DataFrame(columns=["项目名", "开始制作日期", "交付日期", "集数", "项目等级", "负责人", "当前状态", "备注"])
     return df.rename(
         columns={
             "id": "ID",
             "project_name": "项目名",
             "start_date": "开始制作日期",
+            "delivery_date": "交付日期",
             "episodes": "集数",
             "project_level": "项目等级",
             "owner": "负责人",
@@ -389,6 +421,7 @@ def seed_sample_data():
         {
             "project_name": "逆袭女王",
             "start_date": "2026-06-23",
+            "delivery_date": "2026-07-02",
             "episodes": 30,
             "project_level": "B级",
             "owner": "Alice",
@@ -398,6 +431,7 @@ def seed_sample_data():
         {
             "project_name": "豪门错爱",
             "start_date": "2026-06-25",
+            "delivery_date": "2026-07-04",
             "episodes": 30,
             "project_level": "B级",
             "owner": "Ben",
@@ -407,6 +441,7 @@ def seed_sample_data():
         {
             "project_name": "重生之后",
             "start_date": "2026-06-29",
+            "delivery_date": "2026-07-08",
             "episodes": 30,
             "project_level": "B级",
             "owner": "Cindy",
@@ -416,6 +451,7 @@ def seed_sample_data():
         {
             "project_name": "契约恋人",
             "start_date": "2026-06-21",
+            "delivery_date": "2026-06-30",
             "episodes": 30,
             "project_level": "B级",
             "owner": "Dora",
@@ -425,6 +461,7 @@ def seed_sample_data():
         {
             "project_name": "白月光归来",
             "start_date": "2026-06-20",
+            "delivery_date": "2026-06-29",
             "episodes": 30,
             "project_level": "B级",
             "owner": "Eva",
