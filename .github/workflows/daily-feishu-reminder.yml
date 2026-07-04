@@ -2,6 +2,8 @@ name: Daily Feishu Reminder
 
 on:
   schedule:
+    # GitHub Actions uses UTC. Beijing time 09:57 = UTC 01:57.
+    - cron: "57 1 * * *"
     # GitHub Actions uses UTC. Beijing time 16:00 = UTC 08:00.
     - cron: "0 8 * * *"
   workflow_dispatch:
