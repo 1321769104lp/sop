@@ -81,6 +81,23 @@ def concise_risk(row: dict) -> str:
     return "按节点推进"
 
 
+def urge_owner_for_stage(row: dict) -> str:
+    stage = row.get("stage", "")
+    if stage == "超期":
+        return "项目负责人 / 制片 / 承制方"
+    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+        return "制片 / 审核负责人 / 承制方"
+    if row.get("is_first_episode") or "首集" in stage:
+        return "导演 / 剪辑 / 承制方"
+    if row.get("is_asset") or "资产" in stage:
+        return "制片 / 版权 / 资产负责人"
+    if row.get("is_batch") or "一卡前" in stage or "2-10" in stage or "全集" in stage or "制作" in stage:
+        return "承制方 / 制片"
+    if "未开始" in stage or "等待" in stage:
+        return "项目负责人 / 制片"
+    return row.get("urge") or "项目负责人 / 制片"
+
+
 def generate_sign(secret: str, timestamp: int) -> str:
     string_to_sign = f"{timestamp}\n{secret}"
     hmac_code = hmac.new(
@@ -289,6 +306,7 @@ def build_rows(today: date) -> list[dict]:
                 "status": project.get("status", "进行中"),
             }
         )
+        rows[-1]["urge"] = urge_owner_for_stage(rows[-1])
         rows[-1]["today_focus"] = concise_task(rows[-1])
         rows[-1]["risk_brief"] = concise_risk(rows[-1])
     return sorted(
@@ -331,7 +349,7 @@ def build_message(today: date) -> str:
                 f"{row['priority_label']}《{row['display_name']}》",
                 f"阶段：{row['stage']}｜交付：{row['delivery_countdown']}",
                 f"今天重点：{row['today_focus']}",
-                "催：承制方",
+                f"催：{row['urge']}",
                 f"风险：{row['risk_brief']}",
             ]
         )
