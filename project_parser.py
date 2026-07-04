@@ -1,6 +1,8 @@
 import re
 from datetime import date, timedelta
 
+from utils_time import today_beijing
+
 
 PROJECT_LINE_PATTERN = re.compile(r"(?:项目|片名|剧名)[:：]\s*(.+)")
 MILESTONE_PATTERN = re.compile(r"(.+?)[（(]\s*(\d+)\s*天\s*[）)]\s*(\d{1,2})月(\d{1,2})日")
@@ -128,7 +130,7 @@ def parse_explicit_milestones(lines: list[str], year: int) -> list[dict]:
 
 def parse_chinese_schedule_text(text: str, year: int | None = None) -> dict:
     """解析制作排期文本，支持完整节点，也支持按等级和交付时间自动倒推。"""
-    base_year = year or date.today().year
+    base_year = year or today_beijing().year
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     project_name = extract_project_name(text, lines)
@@ -139,6 +141,7 @@ def parse_chinese_schedule_text(text: str, year: int | None = None) -> dict:
     if milestones:
         first_due_date = date.fromisoformat(milestones[0]["due_date"])
         start_date = first_due_date - timedelta(days=milestones[0]["duration"] - 1)
+        delivery_date = extract_delivery_date(text, base_year) or date.fromisoformat(milestones[-1]["due_date"])
     else:
         delivery_date = extract_delivery_date(text, base_year)
         if not project_level:
@@ -169,6 +172,7 @@ def parse_chinese_schedule_text(text: str, year: int | None = None) -> dict:
     return {
         "project_name": project_name,
         "start_date": start_date.strftime("%Y-%m-%d"),
+        "delivery_date": delivery_date.strftime("%Y-%m-%d") if delivery_date else "",
         "episodes": 30,
         "project_level": project_level,
         "owner": "",
