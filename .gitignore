@@ -17,3 +17,6 @@ venv/
 
 # Streamlit
 .streamlit/
+
+# Local logs
+*.log
