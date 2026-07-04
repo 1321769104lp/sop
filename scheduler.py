@@ -105,6 +105,76 @@ def urge_owner_for_stage(row: dict) -> str:
     return row.get("urge") or "项目负责人 / 制片"
 
 
+def clean_priority_label(label: str) -> str:
+    """把首页标签转成飞书用的方括号标签。"""
+    return (label or "常规").strip("【】")
+
+
+def delivery_delta(row: dict, today: date) -> int | None:
+    """计算距离最终交付日的天数。"""
+    delivery_date = row.get("delivery_date")
+    if not delivery_date:
+        return None
+    return (date.fromisoformat(delivery_date) - today).days
+
+
+def contractor_output(row: dict) -> str:
+    """承制方这一侧要补的具体产出物。"""
+    stage = row.get("stage", "")
+    if stage == "超期":
+        return "补齐缺口产出"
+    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+        return "交付成片、工程文件和验收材料"
+    if row.get("is_first_episode") or "首集" in stage:
+        return "首集成片和修改反馈版"
+    if row.get("is_asset") or "资产" in stage:
+        return "角色、场景、道具等资产包"
+    if row.get("is_batch") or "一卡前" in stage or "2-10" in stage or "全集" in stage or "制作" in stage:
+        return f"{stage}阶段成片"
+    if "未开始" in stage or "等待" in stage:
+        return "准备下一节点所需素材"
+    return f"{stage}产出物"
+
+
+def producer_action(row: dict) -> str:
+    """制片这一侧要做的具体确认动作。"""
+    stage = row.get("stage", "")
+    if stage == "超期":
+        return "确认交付状态"
+    if row.get("is_delivery") or "终审" in stage or "交付" in stage:
+        return "确认验收、上传和交付状态"
+    if row.get("is_first_episode") or "首集" in stage:
+        return "确认首集方向和修改意见"
+    if row.get("is_asset") or "资产" in stage:
+        return "确认资产是否齐套可开工"
+    if row.get("is_batch") or "一卡前" in stage or "2-10" in stage or "全集" in stage or "制作" in stage:
+        return "确认产出进度和反馈收口"
+    if "未开始" in stage or "等待" in stage:
+        return "确认下一节点启动时间"
+    return f"确认{stage}进度"
+
+
+def build_project_reminder_lines(row: dict, today: date) -> list[str]:
+    """按固定格式生成单个项目的飞书提醒。"""
+    level = row.get("project_level") or "自定义"
+    day = row.get("day") or 0
+    delivery_date = row.get("delivery_date") or "未配置"
+    delta = delivery_delta(row, today)
+    overdue = row.get("stage") == "超期" or (delta is not None and delta < 0)
+
+    if overdue:
+        over_days = abs(delta) if delta is not None else abs(int(row.get("days_to_due") or 0))
+        title = f"[超期]《{row['display_name']}》｜{level}第{day}天｜应交{delivery_date}｜已超{over_days}天"
+        detail = "承制方：补齐缺口产出；制片：确认交付状态。"
+        return [title, detail]
+
+    remain_days = delta if delta is not None else 0
+    label = clean_priority_label(row.get("priority_label", "常规"))
+    title = f"[{label}]《{row['display_name']}》｜{level}第{day}天｜交付{delivery_date}｜剩{remain_days}天"
+    detail = f"承制方：{contractor_output(row)}；制片：{producer_action(row)}。"
+    return [title, detail]
+
+
 def calculate_importance(info: dict) -> int:
     """数字越小越重要，飞书和首页都按这个排序。"""
     if info.get("stage") == "超期":
@@ -297,6 +367,7 @@ def build_today_rows(today=None) -> list[dict]:
                 "priority_label": build_priority_label(info),
                 "project_name": project["project_name"],
                 "display_name": chinese_project_name(project["project_name"]),
+                "project_level": project.get("project_level") or "自定义",
                 "start_date": project["start_date"],
                 "day": info["day"],
                 "delivery_date": info.get("delivery_date"),
@@ -349,14 +420,12 @@ def build_feishu_message(today=None) -> str:
         return "\n".join(lines)
 
     for row in rows:
+        title, detail = build_project_reminder_lines(row, today)
         lines.extend(
             [
                 "",
-                f"{row['priority_label']}《{row['display_name']}》",
-                f"阶段：{row['stage']}｜交付：{row['delivery_countdown']}",
-                f"今天重点：{row['today_focus']}",
-                f"催：{row['urge']}",
-                f"风险：{row['risk_brief']}",
+                title,
+                detail,
             ]
         )
     return "\n".join(lines)
