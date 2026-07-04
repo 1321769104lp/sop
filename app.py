@@ -12,6 +12,14 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from delivery_rules import (
+    cycle_days_for_level,
+    delivery_label,
+    format_delivery_countdown,
+    format_summary_line,
+    resolve_delivery_date,
+    summarize_rows,
+)
 from database import (
     add_project,
     delete_project,
@@ -40,6 +48,7 @@ from scheduler import (
     update_reminder_times,
 )
 from scripts.export_actions_data import export_actions_data
+from utils_time import now_beijing, today_beijing
 
 
 STATUS_OPTIONS = ["进行中", "已交付", "延期", "暂停"]
@@ -92,7 +101,7 @@ def sync_actions_data_to_github() -> str:
     if add_result.returncode != 0:
         raise RuntimeError(add_result.stderr or add_result.stdout)
 
-    commit_message = f"Update actions project data {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    commit_message = f"Update actions project data {now_beijing().strftime('%Y-%m-%d %H:%M:%S')}"
     commit_result = run_git_command(["commit", "-m", commit_message])
     if commit_result.returncode != 0:
         output = f"{commit_result.stdout}\n{commit_result.stderr}".strip()
@@ -109,7 +118,7 @@ def sync_actions_data_to_github() -> str:
 def beijing_time_to_utc_cron(reminder_time: str) -> tuple[int, int]:
     """把北京时间 HH:MM 转成 GitHub Actions 使用的 UTC cron。"""
     hour_text, minute_text = reminder_time.split(":")
-    local_dt = datetime.combine(date.today(), time(int(hour_text), int(minute_text)))
+    local_dt = datetime.combine(today_beijing(), time(int(hour_text), int(minute_text)))
     utc_dt = local_dt - timedelta(hours=8)
     return utc_dt.minute, utc_dt.hour
 
@@ -276,14 +285,18 @@ def bootstrap_app():
 def project_form(defaults: dict | None = None) -> dict:
     """项目表单，新增和编辑共用。"""
     defaults = defaults or {}
-    start_value = defaults.get("start_date") or date.today().strftime("%Y-%m-%d")
+    start_value = defaults.get("start_date") or today_beijing().strftime("%Y-%m-%d")
     if isinstance(start_value, str):
         start_value = datetime.strptime(start_value, "%Y-%m-%d").date()
+    delivery_value = defaults.get("delivery_date") or start_value
+    if isinstance(delivery_value, str):
+        delivery_value = datetime.strptime(delivery_value, "%Y-%m-%d").date()
 
     col1, col2 = st.columns(2)
     with col1:
         project_name = st.text_input("项目名", value=defaults.get("project_name", ""))
         start_date = st.date_input("开始制作日期", value=start_value)
+        delivery_date = st.date_input("交付日期", value=delivery_value)
         episodes = st.number_input("集数", min_value=1, max_value=300, value=int(defaults.get("episodes") or 30))
         project_level = st.selectbox(
             "项目等级",
@@ -302,6 +315,7 @@ def project_form(defaults: dict | None = None) -> dict:
     return {
         "project_name": project_name.strip(),
         "start_date": start_date.strftime("%Y-%m-%d"),
+        "delivery_date": delivery_date.strftime("%Y-%m-%d"),
         "episodes": episodes,
         "project_level": project_level,
         "owner": owner.strip(),
@@ -312,18 +326,11 @@ def project_form(defaults: dict | None = None) -> dict:
 
 def show_today_page():
     st.title("今日项目推进表")
-    rows = build_today_rows(today=date.today())
+    today = today_beijing()
+    rows = build_today_rows(today=today)
 
-    total = len(rows)
-    overdue = sum(1 for row in rows if row["stage"] == "超期")
-    delivery = sum(1 for row in rows if row.get("is_delivery"))
-    first_episode = sum(1 for row in rows if row.get("is_first_episode"))
-
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("进行中项目", f"{total} 个")
-    metric_cols[1].metric("超期项目", f"{overdue} 个")
-    metric_cols[2].metric("交付节点", f"{delivery} 个")
-    metric_cols[3].metric("首集关键节点", f"{first_episode} 个")
+    st.markdown(f"**【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】**")
+    st.write(format_summary_line(summarize_rows(rows)))
 
     if not rows:
         st.info("今日暂无需要提醒的项目。")
@@ -361,7 +368,7 @@ def show_today_page():
     )
 
     with st.expander("查看今日飞书推送预览"):
-        st.text(build_feishu_message(today=date.today()))
+        st.text(build_feishu_message(today=today))
 
 
 def show_project_list_page():
@@ -376,6 +383,7 @@ def show_project_list_page():
             "id": "ID",
             "project_name": "项目名",
             "start_date": "开始制作日期",
+            "delivery_date": "交付日期",
             "episodes": "集数",
             "project_level": "项目等级",
             "owner": "负责人",
@@ -386,7 +394,7 @@ def show_project_list_page():
         }
     )
     df.insert(0, "序号", range(1, len(df) + 1))
-    display_cols = ["序号", "项目名", "开始制作日期", "集数", "项目等级", "负责人", "当前状态", "备注", "创建时间", "更新时间"]
+    display_cols = ["序号", "项目名", "开始制作日期", "交付日期", "集数", "项目等级", "负责人", "当前状态", "备注", "创建时间", "更新时间"]
     st.dataframe(
         df[display_cols],
         use_container_width=True,
@@ -423,11 +431,15 @@ def parse_date_value(value) -> date:
     return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
 
 
-def project_delivery_date(project: dict, milestones: list[dict]) -> date:
-    """读取项目交付日期；没有结构化节点时用旧 10 天 SOP 兜底。"""
-    if milestones:
-        return parse_date_value(milestones[-1]["due_date"])
-    return parse_date_value(project["start_date"]) + timedelta(days=9)
+def project_delivery_info(project: dict) -> dict:
+    """读取正式交付日期；没有填写时只返回预估交付日。"""
+    cycle_days = cycle_days_for_level(project.get("project_level") or "B级")
+    return resolve_delivery_date(project, cycle_days=cycle_days)
+
+
+def project_delivery_date(project: dict, milestones: list[dict] | None = None) -> date:
+    """兼容旧调用：返回正式交付日或预估交付日。"""
+    return project_delivery_info(project)["delivery_date"]
 
 
 def delivery_badge(delivery_date: date, today: date, status: str) -> str:
@@ -445,28 +457,19 @@ def delivery_badge(delivery_date: date, today: date, status: str) -> str:
 def append_remark(existing: str, line: str) -> str:
     """追加一条简短备注。"""
     existing = (existing or "").strip()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    timestamp = now_beijing().strftime("%Y-%m-%d %H:%M")
     new_line = f"{timestamp} {line}"
     return f"{existing}\n{new_line}" if existing else new_line
 
 
 def rebuild_project_to_delivery(project: dict, new_delivery_date: date, status: str | None = None) -> dict:
-    """更新项目交付日期，并同步重算节点。"""
-    milestones = get_project_milestones(project["id"])
+    """更新项目正式交付日期。"""
     data = dict(project)
     if status:
         data["status"] = status
-
-    if milestones:
-        start_date, rebuilt_milestones = rebuild_milestones_by_delivery_date(milestones, new_delivery_date)
-        data["start_date"] = start_date
-        data["remark"] = append_remark(data.get("remark", ""), f"交付日期调整为 {new_delivery_date.strftime('%Y-%m-%d')}，节点已自动重算。")
-        update_project(project["id"], data)
-        replace_project_milestones(project["id"], rebuilt_milestones)
-    else:
-        data["start_date"] = (new_delivery_date - timedelta(days=9)).strftime("%Y-%m-%d")
-        data["remark"] = append_remark(data.get("remark", ""), f"交付日期调整为 {new_delivery_date.strftime('%Y-%m-%d')}。")
-        update_project(project["id"], data)
+    data["delivery_date"] = new_delivery_date.strftime("%Y-%m-%d")
+    data["remark"] = append_remark(data.get("remark", ""), f"交付日期调整为 {new_delivery_date.strftime('%Y-%m-%d')}。")
+    update_project(project["id"], data)
 
     return data
 
@@ -506,26 +509,26 @@ def delay_project_delivery(project_id: int, delay_days: int):
         set_workbench_notice("项目不存在。", success=False)
         return
 
-    milestones = get_project_milestones(project_id)
-    current_delivery = project_delivery_date(project, milestones)
-    base_date = max(current_delivery, date.today())
+    current_delivery = project_delivery_date(project)
+    base_date = max(current_delivery, today_beijing())
     new_delivery_date = base_date + timedelta(days=delay_days)
     rebuild_project_to_delivery(project, new_delivery_date, status="延期")
 
     ok, sync_message = sync_after_project_change()
     set_workbench_notice(
-        f"《{project['project_name']}》已延期至 {new_delivery_date.strftime('%Y-%m-%d')}，节点已重算。\n{sync_message}",
+        f"《{project['project_name']}》已延期至 {new_delivery_date.strftime('%Y-%m-%d')}。\n{sync_message}",
         success=ok,
     )
 
 
 def build_workbench_rows(include_delivered: bool = True) -> list[dict]:
     """生成项目工作台排序后的行数据。"""
-    today = date.today()
+    today = today_beijing()
     rows = []
     for project in list_projects(include_delivered=include_delivered):
         milestones = get_project_milestones(project["id"])
-        delivery = project_delivery_date(project, milestones)
+        delivery_info = project_delivery_info(project)
+        delivery = delivery_info["delivery_date"]
         status = project.get("status") or "进行中"
         delta = (delivery - today).days
         if status == "已交付":
@@ -545,6 +548,7 @@ def build_workbench_rows(include_delivered: bool = True) -> list[dict]:
                 "delivery_date": delivery,
                 "delivery_delta": delta,
                 "delivery_badge": delivery_badge(delivery, today, status),
+                "is_estimated_delivery": delivery_info["is_estimated_delivery"],
                 "sort_priority": priority,
                 "has_milestones": bool(milestones),
             }
@@ -565,7 +569,7 @@ def show_workbench_notice():
 
 def project_day_number(start_date, today: date | None = None) -> int:
     """计算当前是项目第几天。"""
-    today = today or date.today()
+    today = today or today_beijing()
     return max(1, (today - parse_date_value(start_date)).days + 1)
 
 
@@ -620,9 +624,8 @@ def save_workbench_edits(edited_df: pd.DataFrame) -> tuple[int, int, int]:
         owner = clean_cell(row["负责人"])
         remark = clean_cell(row["备注"])
         new_delivery_date = parse_date_value(row["交付日期"])
-        milestones = get_project_milestones(project_id)
-        old_delivery_date = project_delivery_date(project, milestones)
-        delivery_changed = new_delivery_date != old_delivery_date
+        old_delivery_date = project_delivery_date(project)
+        delivery_changed = new_delivery_date != old_delivery_date or not (project.get("delivery_date") or "").strip()
 
         data = dict(project)
         data.update(
@@ -630,6 +633,7 @@ def save_workbench_edits(edited_df: pd.DataFrame) -> tuple[int, int, int]:
                 "project_name": project_name,
                 "episodes": episodes,
                 "project_level": project_level,
+                "delivery_date": new_delivery_date.strftime("%Y-%m-%d"),
                 "owner": owner,
                 "status": status,
                 "remark": remark,
@@ -646,17 +650,11 @@ def save_workbench_edits(edited_df: pd.DataFrame) -> tuple[int, int, int]:
 
         rebuilt_milestones = None
         if delivery_changed:
-            if milestones:
-                start_date, rebuilt_milestones = rebuild_milestones_by_delivery_date(milestones, new_delivery_date)
-                data["start_date"] = start_date
-            else:
-                data["start_date"] = (new_delivery_date - timedelta(days=9)).strftime("%Y-%m-%d")
             data["remark"] = append_remark(
                 data.get("remark", ""),
-                f"交付日期调整为 {new_delivery_date.strftime('%Y-%m-%d')}，节点已自动重算。",
+                f"交付日期调整为 {new_delivery_date.strftime('%Y-%m-%d')}。",
             )
-        else:
-            data["start_date"] = project["start_date"]
+        data["start_date"] = project["start_date"]
 
         newly_delivered = status == "已交付" and project.get("status") != "已交付"
         pending_updates.append((project_id, data, rebuilt_milestones, delivery_changed, newly_delivered))
@@ -684,17 +682,17 @@ def show_delivery_confirmation_page():
         st.info("今天没有到期或超期的项目。")
         return
 
-    today = date.today()
+    today = today_beijing()
     for row in rows:
         delivery_text = row["delivery_date"].strftime("%Y-%m-%d")
         is_overdue = row["delivery_delta"] < 0
         tag = "超期" if is_overdue else "今天交付"
-        date_label = "应交" if is_overdue else "交付"
-        countdown = f"已超{abs(row['delivery_delta'])}天" if is_overdue else "今天到期"
+        date_label = delivery_label(row)
+        countdown = f"已超{abs(row['delivery_delta'])}天" if is_overdue else "今天交付"
         day_number = project_day_number(row["start_date"], today=today)
 
         st.subheader(f"[{tag}]《{row['project_name']}》")
-        st.write(f"{row['project_level']}第{day_number}天｜{date_label}{delivery_text}｜{countdown}")
+        st.write(f"{row['project_level']}D{day_number}｜{date_label}{delivery_text}｜{countdown}")
         if row.get("owner"):
             st.caption(f"负责人：{row['owner']}")
 
@@ -754,6 +752,7 @@ def show_project_workbench_page():
             {
                 "ID": row["id"],
                 "交付状态": row["delivery_badge"],
+                "交付类型": delivery_label(row),
                 "项目名": row["project_name"],
                 "交付日期": row["delivery_date"],
                 "开始制作日期": parse_date_value(row["start_date"]),
@@ -771,10 +770,11 @@ def show_project_workbench_page():
         hide_index=True,
         height=table_height(len(table_rows), min_height=360, max_height=760),
         num_rows="fixed",
-        disabled=["ID", "交付状态", "开始制作日期"],
+        disabled=["ID", "交付状态", "交付类型", "开始制作日期"],
         column_config={
             "ID": st.column_config.NumberColumn("ID", width="small"),
             "交付状态": st.column_config.TextColumn("交付状态", width="small"),
+            "交付类型": st.column_config.TextColumn("交付类型", width="small"),
             "项目名": st.column_config.TextColumn("项目名", width="large", required=True),
             "交付日期": st.column_config.DateColumn("交付日期", format="YYYY-MM-DD", required=True),
             "开始制作日期": st.column_config.DateColumn("开始制作日期", format="YYYY-MM-DD"),
@@ -793,7 +793,7 @@ def show_project_workbench_page():
                 set_workbench_notice("没有检测到需要保存的修改。")
             else:
                 ok, sync_message = sync_after_project_change()
-                message = f"已保存 {changed_count} 个项目；重算节点 {rebuilt_count} 个；移出提醒 {delivered_count} 个。\n{sync_message}"
+                message = f"已保存 {changed_count} 个项目；更新交付日期 {rebuilt_count} 个；移出提醒 {delivered_count} 个。\n{sync_message}"
                 set_workbench_notice(message, success=ok)
             st.rerun()
         except Exception as exc:
@@ -809,7 +809,7 @@ def project_name_exists(project_name: str) -> bool:
 def handle_smart_add():
     """智能识别新增的按钮回调：保存成功后清空粘贴框。"""
     text = st.session_state.get("smart_schedule_text", "")
-    year = int(st.session_state.get("smart_schedule_year", date.today().year))
+    year = int(st.session_state.get("smart_schedule_year", today_beijing().year))
 
     try:
         parsed = parse_chinese_schedule_text(text, year=year)
@@ -893,7 +893,7 @@ def show_smart_add_page():
         with quick_col2:
             quick_project_level = st.selectbox("项目等级", ["S级", "A级", "B级"], key="quick_project_level")
         with quick_col3:
-            quick_delivery_date = st.date_input("交付日期", value=date.today(), key="quick_delivery_date")
+            quick_delivery_date = st.date_input("交付日期", value=today_beijing(), key="quick_delivery_date")
 
         quick_submit = st.form_submit_button("按选择新建项目", type="primary")
         if quick_submit:
@@ -903,7 +903,7 @@ def show_smart_add_page():
         "年份",
         min_value=2020,
         max_value=2100,
-        value=date.today().year,
+        value=today_beijing().year,
         key="smart_schedule_year",
     )
 
@@ -918,7 +918,7 @@ def show_smart_add_page():
             else:
                 st.success("已识别成功，请确认后保存。")
             milestones = parsed.get("milestones", [])
-            delivery_date = milestones[-1]["due_date"] if milestones else ""
+            delivery_date = parsed.get("delivery_date") or (milestones[-1]["due_date"] if milestones else "")
             col1, col2, col3 = st.columns(3)
             col1.metric("开始制作日期", parsed["start_date"])
             col2.metric("交付节点", delivery_date)
@@ -993,24 +993,18 @@ def show_edit_page():
     )
     st.dataframe(milestone_df, use_container_width=True, hide_index=True)
 
-    current_delivery_date = datetime.strptime(milestones[-1]["due_date"], "%Y-%m-%d").date()
+    current_delivery_date = project_delivery_date(project)
     new_delivery_date = st.date_input("修改交付日期", value=current_delivery_date)
-    st.caption("保存后会按当前各阶段耗时重新倒推全部节点，首页提醒和飞书推送会同步使用新日期。")
+    st.caption("保存后会更新项目正式交付日期，首页提醒和飞书推送会同步使用新日期。")
 
-    if st.button("按新交付日期重算节点并保存", type="primary"):
-        start_date, rebuilt_milestones = rebuild_milestones_by_delivery_date(milestones, new_delivery_date)
-        data["start_date"] = start_date
+    if st.button("保存交付日期", type="primary"):
+        data["delivery_date"] = new_delivery_date.strftime("%Y-%m-%d")
         remark_lines = [
-            "按修改后的交付日期重算节点：",
-            *[
-                f"{item['name']}（{item['duration']}天）：{item['due_date']}"
-                for item in rebuilt_milestones
-            ],
+            f"交付日期调整为：{new_delivery_date.strftime('%Y-%m-%d')}",
         ]
         data["remark"] = "\n".join(remark_lines)
         update_project(project_id, data)
-        replace_project_milestones(project_id, rebuilt_milestones)
-        st.success("交付日期和全部节点已同步更新。")
+        st.success("交付日期已同步更新。")
         st.rerun()
 
 
@@ -1157,7 +1151,7 @@ def render_excel_export_section():
     st.download_button(
         "下载 Excel",
         data=output,
-        file_name=f"短剧SOP项目列表_{date.today().strftime('%Y%m%d')}.xlsx",
+        file_name=f"短剧SOP项目列表_{today_beijing().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="data_export_download",
     )
