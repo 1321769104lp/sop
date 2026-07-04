@@ -1,4 +1,4 @@
-﻿from datetime import date, datetime
+from datetime import date, datetime
 from io import BytesIO
 import os
 import shutil
@@ -38,7 +38,7 @@ from scripts.export_actions_data import export_actions_data
 
 
 STATUS_OPTIONS = ["进行中", "已交付", "延期", "暂停"]
-LEVEL_OPTIONS = ["自定义", "B级", "A级", "C级"]
+LEVEL_OPTIONS = ["自定义", "S级", "A级", "B级"]
 
 
 def find_git_executable() -> str:
@@ -273,9 +273,39 @@ def handle_smart_add():
         st.session_state["smart_add_error"] = f"新建失败：{exc}"
 
 
+def build_quick_schedule_text(project_name: str, project_level: str, delivery_date: date) -> str:
+    """把表单选择项转成智能识别可复用的排期文本。"""
+    return (
+        f"项目：{project_name.strip()}\n"
+        f"等级：{project_level}\n"
+        f"交付时间：{delivery_date.month}月{delivery_date.day}日"
+    )
+
+
+def save_quick_project(project_name: str, project_level: str, delivery_date: date):
+    """用项目名、等级、交付日期快速创建项目。"""
+    if not project_name.strip():
+        st.error("请填写项目名。")
+        return
+
+    try:
+        parsed = parse_chinese_schedule_text(
+            build_quick_schedule_text(project_name, project_level, delivery_date),
+            year=delivery_date.year,
+        )
+        if project_name_exists(parsed["project_name"]):
+            st.error(f"项目“{parsed['project_name']}”已存在，不能重复新建。")
+            return
+
+        add_project(parsed)
+        st.success(f"项目“{parsed['project_name']}”已新建成功，节点已按 {project_level} 倒推。")
+    except Exception as exc:
+        st.error(f"新建失败：{exc}")
+
+
 def show_smart_add_page():
     st.title("智能识别新增")
-    st.write("粘贴项目排期即可。可以给完整节点；也可以只给项目名、S/A/B级和交付时间，系统会自动倒推全部节点。")
+    st.write("项目名手动填写，等级和交付时间直接选择；如果已有完整排期，也可以继续粘贴识别。")
 
     if st.session_state.get("smart_add_success"):
         message = st.session_state.pop("smart_add_success")
@@ -290,7 +320,7 @@ def show_smart_add_page():
     text = st.text_area(
         "粘贴排期文本",
         key="smart_schedule_text",
-        height=220,
+        height=128,
         placeholder=(
             "项目：我的妈咪是冰雪女王：My Mom Is the Ice Queen\n"
             "等级：S级\n"
@@ -303,6 +333,21 @@ def show_smart_add_page():
             "终审与交付（2天）7月14日"
         ),
     )
+
+    with st.form("quick_project_form"):
+        st.subheader("选择新增")
+        quick_col1, quick_col2, quick_col3 = st.columns([2, 1, 1])
+        with quick_col1:
+            quick_project_name = st.text_input("项目名", key="quick_project_name")
+        with quick_col2:
+            quick_project_level = st.selectbox("项目等级", ["S级", "A级", "B级"], key="quick_project_level")
+        with quick_col3:
+            quick_delivery_date = st.date_input("交付日期", value=date.today(), key="quick_delivery_date")
+
+        quick_submit = st.form_submit_button("按选择新建项目", type="primary")
+        if quick_submit:
+            save_quick_project(quick_project_name, quick_project_level, quick_delivery_date)
+
     year = st.number_input(
         "年份",
         min_value=2020,
