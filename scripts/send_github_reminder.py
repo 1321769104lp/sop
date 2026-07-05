@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 
 import requests
@@ -22,11 +22,88 @@ from delivery_rules import (
     format_summary_line,
     summarize_rows,
 )
-from utils_time import today_beijing
+from utils_time import BEIJING_TZ, now_beijing
 from sop import get_sop_info
 
 
 DATA_PATH = Path("data/projects_for_actions.json")
+SEND_STATE_PATH = Path(os.getenv("SEND_STATE_PATH", "data/github_send_state.json"))
+DEFAULT_REMINDER_TIMES = "09:57,16:00"
+DEFAULT_RETRY_WINDOW_MINUTES = 180
+
+
+def parse_reminder_times(value: str | None) -> list[str]:
+    raw_value = value or DEFAULT_REMINDER_TIMES
+    times = []
+    for item in raw_value.replace("\n", ",").split(","):
+        clean = item.strip()
+        if not clean:
+            continue
+        try:
+            datetime.strptime(clean, "%H:%M")
+        except ValueError:
+            continue
+        if clean not in times:
+            times.append(clean)
+    return times or DEFAULT_REMINDER_TIMES.split(",")
+
+
+def read_send_state() -> dict:
+    if not SEND_STATE_PATH.exists():
+        return {"sent_slots": {}}
+    try:
+        state = json.loads(SEND_STATE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"sent_slots": {}}
+    state.setdefault("sent_slots", {})
+    return state
+
+
+def write_send_state(state: dict) -> None:
+    SEND_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SEND_STATE_PATH.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def reminder_datetime(day: date, reminder_time: str) -> datetime:
+    hour, minute = [int(part) for part in reminder_time.split(":")]
+    return datetime.combine(day, datetime_time(hour, minute), tzinfo=BEIJING_TZ)
+
+
+def resolve_send_slot(current_time: datetime, reminder_times: list[str]) -> dict | None:
+    if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        run_id = os.getenv("GITHUB_RUN_ID", "manual")
+        return {
+            "key": f"{current_time.strftime('%Y-%m-%d')}|manual|{run_id}",
+            "send_date": current_time.date(),
+            "label": "manual",
+        }
+
+    retry_window = int(os.getenv("RETRY_WINDOW_MINUTES", str(DEFAULT_RETRY_WINDOW_MINUTES)))
+    for base_day in [current_time.date(), current_time.date() - timedelta(days=1)]:
+        for reminder_time in reminder_times:
+            base_dt = reminder_datetime(base_day, reminder_time)
+            delta_minutes = (current_time - base_dt).total_seconds() / 60
+            if 0 <= delta_minutes <= retry_window:
+                return {
+                    "key": f"{base_day.strftime('%Y-%m-%d')}|{reminder_time}",
+                    "send_date": base_day,
+                    "label": reminder_time,
+                }
+    return None
+
+
+def mark_slot_sent(state: dict, slot: dict, result: dict) -> None:
+    state.setdefault("sent_slots", {})
+    state["sent_slots"][slot["key"]] = {
+        "sent_at": now_beijing().strftime("%Y-%m-%d %H:%M:%S"),
+        "slot": slot["label"],
+        "run_id": os.getenv("GITHUB_RUN_ID", ""),
+        "response": result,
+    }
+    write_send_state(state)
 
 
 def production_day(start_date: str, today: date) -> int:
@@ -434,7 +511,22 @@ def build_message(today: date) -> str:
 
 
 def main():
-    today = today_beijing()
+    current_time = now_beijing()
+    reminder_times = parse_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME")))
+    slot = resolve_send_slot(current_time, reminder_times)
+    if slot is None:
+        print(
+            "Current time is outside configured reminder retry windows; "
+            f"now={current_time.strftime('%Y-%m-%d %H:%M:%S')}, reminder_times={','.join(reminder_times)}"
+        )
+        return
+
+    state = read_send_state()
+    if slot["key"] in state.get("sent_slots", {}):
+        print(f"Reminder slot already sent, skip: {slot['key']}")
+        return
+
+    today = slot["send_date"]
     message = build_message(today)
     print(message)
 
@@ -446,6 +538,7 @@ def main():
         os.getenv("FEISHU_SECRET", ""),
         message,
     )
+    mark_slot_sent(state, slot, result)
     print(result)
 
 
