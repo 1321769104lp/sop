@@ -2,11 +2,38 @@ name: Daily Feishu Reminder
 
 on:
   schedule:
-    # GitHub Actions uses UTC. Beijing time 09:57 = UTC 01:57.
+    # Retry window for Beijing time 09:57; check at 09:57 = UTC 01:57.
     - cron: "57 1 * * *"
-    # GitHub Actions uses UTC. Beijing time 16:00 = UTC 08:00.
+    # Retry window for Beijing time 09:57; check at 10:12 = UTC 02:12.
+    - cron: "12 2 * * *"
+    # Retry window for Beijing time 09:57; check at 10:27 = UTC 02:27.
+    - cron: "27 2 * * *"
+    # Retry window for Beijing time 09:57; check at 10:42 = UTC 02:42.
+    - cron: "42 2 * * *"
+    # Retry window for Beijing time 09:57; check at 10:57 = UTC 02:57.
+    - cron: "57 2 * * *"
+    # Retry window for Beijing time 09:57; check at 11:27 = UTC 03:27.
+    - cron: "27 3 * * *"
+    # Retry window for Beijing time 09:57; check at 11:57 = UTC 03:57.
+    - cron: "57 3 * * *"
+    # Retry window for Beijing time 16:00; check at 16:00 = UTC 08:00.
     - cron: "0 8 * * *"
+    # Retry window for Beijing time 16:00; check at 16:15 = UTC 08:15.
+    - cron: "15 8 * * *"
+    # Retry window for Beijing time 16:00; check at 16:30 = UTC 08:30.
+    - cron: "30 8 * * *"
+    # Retry window for Beijing time 16:00; check at 16:45 = UTC 08:45.
+    - cron: "45 8 * * *"
+    # Retry window for Beijing time 16:00; check at 17:00 = UTC 09:00.
+    - cron: "0 9 * * *"
+    # Retry window for Beijing time 16:00; check at 17:30 = UTC 09:30.
+    - cron: "30 9 * * *"
+    # Retry window for Beijing time 16:00; check at 18:00 = UTC 10:00.
+    - cron: "0 10 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   send-reminder:
@@ -27,4 +54,20 @@ jobs:
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          REMINDER_TIMES: "09:57,16:00"
+          RETRY_WINDOW_MINUTES: "180"
+          SEND_STATE_PATH: "data/github_send_state.json"
         run: python scripts/send_github_reminder.py
+
+      - name: Persist send state
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f data/github_send_state.json ]; then
+            git add data/github_send_state.json
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "Record Feishu reminder send state"
+            git push
+          fi
