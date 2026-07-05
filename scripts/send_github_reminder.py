@@ -233,18 +233,17 @@ def producer_action(row: dict) -> str:
 
 def build_project_reminder_lines(row: dict, today: date) -> list[str]:
     level = row.get("project_level") or "自定义"
-    day = row.get("day") or 0
     delivery_date = row.get("delivery_date") or "未配置"
     countdown = row.get("delivery_countdown") or format_delivery_countdown(row.get("delivery_remaining_days"))
     overdue = row.get("is_overdue", False)
 
     if overdue:
-        title = f"[超期]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
+        title = f"[超期]《{row['display_name']}》｜{level}｜{delivery_label(row)}{delivery_date}｜{countdown}"
         detail = "承制方：补齐缺口产出；制片：确认交付状态。"
         return [title, detail]
 
     label = clean_priority_label(row.get("priority_label", "常规"))
-    title = f"[{label}]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
+    title = f"[{label}]《{row['display_name']}》｜{level}｜{delivery_label(row)}{delivery_date}｜{countdown}"
     detail = f"承制方：{contractor_output(row)}；制片：{producer_action(row)}。"
     return [title, detail]
 
