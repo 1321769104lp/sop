@@ -22,6 +22,7 @@ from delivery_rules import (
     format_summary_line,
     summarize_rows,
 )
+from message_template import load_message_template, render_message_template
 from utils_time import BEIJING_TZ, now_beijing
 from sop import get_sop_info
 
@@ -487,27 +488,27 @@ def build_message(today: date) -> str:
     rows = build_rows(today)
     summary = summarize_rows(rows)
 
-    lines = [
-        f"【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】",
-        format_summary_line(summary),
-        "",
-        "━━━━━━━━━━━━━━",
-    ]
-
     if not rows:
-        lines.append("今日暂无需要提醒的项目。")
-        return "\n".join(lines)
+        items_text = "今日暂无需要提醒的项目。"
+    else:
+        item_lines = []
+        for row in rows:
+            title, detail = build_project_reminder_lines(row, today)
+            item_lines.extend(
+                [
+                    "",
+                    title,
+                    detail,
+                ]
+            )
+        items_text = "\n".join(item_lines).strip()
 
-    for row in rows:
-        title, detail = build_project_reminder_lines(row, today)
-        lines.extend(
-            [
-                "",
-                title,
-                detail,
-            ]
-        )
-    return "\n".join(lines)
+    return render_message_template(
+        template=load_message_template(),
+        date_text=today.strftime("%Y-%m-%d"),
+        summary_text=format_summary_line(summary),
+        items_text=items_text,
+    )
 
 
 def main():
