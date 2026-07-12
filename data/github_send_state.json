@@ -71,6 +71,18 @@
       "run_id": "29143894165",
       "sent_at": "2026-07-11 15:05:09",
       "slot": "13:00"
+    },
+    "2026-07-12|13:00": {
+      "response": {
+        "StatusCode": 0,
+        "StatusMessage": "success",
+        "code": 0,
+        "data": {},
+        "msg": "success"
+      },
+      "run_id": "29184180739",
+      "sent_at": "2026-07-12 15:24:21",
+      "slot": "13:00"
     }
   }
 }
