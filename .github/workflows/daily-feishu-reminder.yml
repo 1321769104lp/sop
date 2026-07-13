@@ -2,26 +2,26 @@ name: Daily Feishu Reminder
 
 on:
   schedule:
-    # Send window 13:00-18:00; check at Beijing 13:00 = UTC 05:00.
-    - cron: "0 5 * * *"
-    # Send window 13:00-18:00; check at Beijing 13:33 = UTC 05:33.
-    - cron: "33 5 * * *"
-    # Send window 13:00-18:00; check at Beijing 14:07 = UTC 06:07.
-    - cron: "7 6 * * *"
-    # Send window 13:00-18:00; check at Beijing 14:40 = UTC 06:40.
+    # Send window 10:00-16:00; check at Beijing 10:00 = UTC 02:00.
+    - cron: "0 2 * * *"
+    # Send window 10:00-16:00; check at Beijing 10:40 = UTC 02:40.
+    - cron: "40 2 * * *"
+    # Send window 10:00-16:00; check at Beijing 11:20 = UTC 03:20.
+    - cron: "20 3 * * *"
+    # Send window 10:00-16:00; check at Beijing 12:00 = UTC 04:00.
+    - cron: "0 4 * * *"
+    # Send window 10:00-16:00; check at Beijing 12:40 = UTC 04:40.
+    - cron: "40 4 * * *"
+    # Send window 10:00-16:00; check at Beijing 13:20 = UTC 05:20.
+    - cron: "20 5 * * *"
+    # Send window 10:00-16:00; check at Beijing 14:00 = UTC 06:00.
+    - cron: "0 6 * * *"
+    # Send window 10:00-16:00; check at Beijing 14:40 = UTC 06:40.
     - cron: "40 6 * * *"
-    # Send window 13:00-18:00; check at Beijing 15:13 = UTC 07:13.
-    - cron: "13 7 * * *"
-    # Send window 13:00-18:00; check at Beijing 15:47 = UTC 07:47.
-    - cron: "47 7 * * *"
-    # Send window 13:00-18:00; check at Beijing 16:20 = UTC 08:20.
-    - cron: "20 8 * * *"
-    # Send window 13:00-18:00; check at Beijing 16:53 = UTC 08:53.
-    - cron: "53 8 * * *"
-    # Send window 13:00-18:00; check at Beijing 17:27 = UTC 09:27.
-    - cron: "27 9 * * *"
-    # Send window 13:00-18:00; check at Beijing 18:00 = UTC 10:00.
-    - cron: "0 10 * * *"
+    # Send window 10:00-16:00; check at Beijing 15:20 = UTC 07:20.
+    - cron: "20 7 * * *"
+    # Send window 10:00-16:00; check at Beijing 16:00 = UTC 08:00.
+    - cron: "0 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -46,8 +46,8 @@ jobs:
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          REMINDER_TIMES: "13:00"
-          RETRY_WINDOW_MINUTES: "300"
+          REMINDER_TIMES: "10:00"
+          RETRY_WINDOW_MINUTES: "360"
           SEND_STATE_PATH: "data/github_send_state.json"
         run: python scripts/send_github_reminder.py
 
