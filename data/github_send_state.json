@@ -371,6 +371,18 @@
       "run_id": "30977430079",
       "sent_at": "2026-08-05 13:13:05",
       "slot": "10:00"
+    },
+    "2026-08-06|10:00": {
+      "response": {
+        "StatusCode": 0,
+        "StatusMessage": "success",
+        "code": 0,
+        "data": {},
+        "msg": "success"
+      },
+      "run_id": "31073559836",
+      "sent_at": "2026-08-06 13:15:00",
+      "slot": "10:00"
     }
   }
 }
