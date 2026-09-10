@@ -24,8 +24,13 @@ from delivery_rules import (
     format_summary_line,
     summarize_rows,
 )
+from message_template import load_message_template, render_message_template
 from utils_time import now_beijing, today_beijing
 
+
+DEFAULT_SEND_WINDOW_START = "13:00"
+DEFAULT_SEND_WINDOW_END = "18:00"
+DEFAULT_WINDOW_CHECK_COUNT = 10
 
 _scheduler = None
 
@@ -166,18 +171,17 @@ def producer_action(row: dict) -> str:
 def build_project_reminder_lines(row: dict, today: date) -> list[str]:
     """按固定格式生成单个项目的飞书提醒。"""
     level = row.get("project_level") or "自定义"
-    day = row.get("day") or 0
     delivery_date = row.get("delivery_date") or "未配置"
     countdown = row.get("delivery_countdown") or format_delivery_countdown(row.get("delivery_remaining_days"))
     overdue = row.get("is_overdue", False)
 
     if overdue:
-        title = f"[超期]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
+        title = f"[超期]《{row['display_name']}》｜{level}｜{delivery_label(row)}{delivery_date}｜{countdown}"
         detail = "承制方：补齐缺口产出；制片：确认交付状态。"
         return [title, detail]
 
     label = clean_priority_label(row.get("priority_label", "常规"))
-    title = f"[{label}]《{row['display_name']}》｜{level}D{day}｜{delivery_label(row)}{delivery_date}｜{countdown}"
+    title = f"[{label}]《{row['display_name']}》｜{level}｜{delivery_label(row)}{delivery_date}｜{countdown}"
     detail = f"承制方：{contractor_output(row)}；制片：{producer_action(row)}。"
     return [title, detail]
 
@@ -398,33 +402,32 @@ def build_today_rows(today=None) -> list[dict]:
     return sorted(rows, key=reminder_sort_key)
 
 
-def build_feishu_message(today=None) -> str:
+def build_feishu_message(today=None, template_text: str | None = None) -> str:
     """构造飞书每日提醒文本。"""
     today = today or today_beijing()
     rows = build_today_rows(today=today)
     summary = summarize_rows(rows)
 
-    lines = [
-        f"【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】",
-        format_summary_line(summary),
-        "",
-        "━━━━━━━━━━━━━━",
-    ]
-
     if not rows:
-        lines.append("今日暂无需要提醒的项目。")
-        return "\n".join(lines)
+        items_text = "今日暂无需要提醒的项目。"
+    else:
+        item_lines = []
+        for row in rows:
+            title, _detail = build_project_reminder_lines(row, today)
+            item_lines.extend(
+                [
+                    "",
+                    title,
+                ]
+            )
+        items_text = "\n".join(item_lines).strip()
 
-    for row in rows:
-        title, detail = build_project_reminder_lines(row, today)
-        lines.extend(
-            [
-                "",
-                title,
-                detail,
-            ]
-        )
-    return "\n".join(lines)
+    return render_message_template(
+        template=template_text or load_message_template(),
+        date_text=today.strftime("%Y-%m-%d"),
+        summary_text=format_summary_line(summary),
+        items_text=items_text,
+    )
 
 
 def send_daily_reminder(send_type: str = "auto") -> dict:
@@ -491,7 +494,73 @@ def parse_reminder_times(value: str | list[str]) -> list[str]:
     return sorted(times)
 
 
-def get_reminder_times(default: str = "09:57,16:00") -> list[str]:
+def reminder_time_to_minutes(value: str) -> int:
+    """把 HH:MM 转成当天分钟数。"""
+    hour, minute = parse_reminder_time(value)
+    return hour * 60 + minute
+
+
+def reminder_minutes_to_time(value: int) -> str:
+    """把当天分钟数转成 HH:MM。"""
+    hour = value // 60
+    minute = value % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def reminder_window_minutes(start_time: str, end_time: str) -> int:
+    """计算发送区间分钟数；目前只支持同一天内的区间。"""
+    start_minutes = reminder_time_to_minutes(start_time)
+    end_minutes = reminder_time_to_minutes(end_time)
+    if end_minutes <= start_minutes:
+        raise ValueError("结束时间必须晚于开始时间。")
+    return end_minutes - start_minutes
+
+
+def generate_reminder_check_times(start_time: str, end_time: str, count: int = DEFAULT_WINDOW_CHECK_COUNT) -> list[str]:
+    """在发送区间内均匀生成检查点，包含开始和结束。"""
+    span_minutes = reminder_window_minutes(start_time, end_time)
+    point_count = max(2, int(count or DEFAULT_WINDOW_CHECK_COUNT))
+    start_minutes = reminder_time_to_minutes(start_time)
+    generated = []
+    seen = set()
+    for index in range(point_count):
+        offset = round(span_minutes * index / (point_count - 1))
+        check_time = reminder_minutes_to_time(start_minutes + offset)
+        if check_time not in seen:
+            seen.add(check_time)
+            generated.append(check_time)
+    return generated
+
+
+def get_reminder_window() -> dict:
+    """读取每天自动发送的时间区间。"""
+    start_time = get_setting("reminder_window_start", "") or get_setting("reminder_time", DEFAULT_SEND_WINDOW_START)
+    end_time = get_setting("reminder_window_end", "") or DEFAULT_SEND_WINDOW_END
+    check_count = int(get_setting("reminder_window_check_count", str(DEFAULT_WINDOW_CHECK_COUNT)) or DEFAULT_WINDOW_CHECK_COUNT)
+    check_times = generate_reminder_check_times(start_time, end_time, check_count)
+    return {
+        "start": start_time,
+        "end": end_time,
+        "check_count": check_count,
+        "check_times": check_times,
+        "window_minutes": reminder_window_minutes(start_time, end_time),
+    }
+
+
+def update_reminder_window(start_time: str, end_time: str, check_count: int = DEFAULT_WINDOW_CHECK_COUNT) -> dict:
+    """保存发送区间，并刷新本地定时检查点。"""
+    check_times = generate_reminder_check_times(start_time, end_time, check_count)
+    set_setting("reminder_window_start", start_time)
+    set_setting("reminder_window_end", end_time)
+    set_setting("reminder_window_check_count", str(max(2, int(check_count or DEFAULT_WINDOW_CHECK_COUNT))))
+    set_setting("reminder_time", start_time)
+    set_setting("reminder_times", ",".join(check_times))
+    if _scheduler:
+        schedule_daily_jobs(_scheduler, check_times)
+    return get_reminder_window()
+
+
+def get_reminder_times(default: str = "13:00") -> list[str]:
     """读取本地多个推送时间，兼容旧的单时间配置。"""
     value = get_setting("reminder_times", "")
     if not value:
@@ -514,6 +583,13 @@ def update_reminder_time(value: str):
     return update_reminder_times([value])
 
 
+def send_auto_reminder_once() -> dict | None:
+    """本地自动检查点使用：今天成功发过就跳过，避免重复推送。"""
+    if has_successful_auto_log(today_beijing().strftime("%Y-%m-%d")):
+        return {"skipped": True, "reason": "today already sent"}
+    return send_daily_reminder(send_type="auto")
+
+
 def schedule_daily_jobs(scheduler: BackgroundScheduler, reminder_times: list[str]):
     """注册或替换多个每日提醒任务。"""
     for job in list(scheduler.get_jobs()):
@@ -523,7 +599,7 @@ def schedule_daily_jobs(scheduler: BackgroundScheduler, reminder_times: list[str
     for index, reminder_time in enumerate(reminder_times):
         hour, minute = parse_reminder_time(reminder_time)
         scheduler.add_job(
-            send_daily_reminder,
+            send_auto_reminder_once,
             CronTrigger(hour=hour, minute=minute),
             id=f"daily_feishu_reminder_{index}",
             replace_existing=True,
@@ -550,7 +626,7 @@ def start_scheduler():
     if _scheduler and _scheduler.running:
         return _scheduler
 
-    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+    reminder_times = get_reminder_window()["check_times"]
     _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     schedule_daily_jobs(_scheduler, reminder_times)
     _scheduler.start()
