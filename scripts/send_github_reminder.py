@@ -29,8 +29,8 @@ from sop import get_sop_info
 
 DATA_PATH = Path("data/projects_for_actions.json")
 SEND_STATE_PATH = Path(os.getenv("SEND_STATE_PATH", "data/github_send_state.json"))
-DEFAULT_REMINDER_TIMES = "09:57,16:00"
-DEFAULT_RETRY_WINDOW_MINUTES = 180
+DEFAULT_REMINDER_TIMES = "13:00"
+DEFAULT_RETRY_WINDOW_MINUTES = 300
 
 
 def parse_reminder_times(value: str | None) -> list[str]:
@@ -492,12 +492,11 @@ def build_message(today: date) -> str:
     else:
         item_lines = []
         for row in rows:
-            title, detail = build_project_reminder_lines(row, today)
+            title, _detail = build_project_reminder_lines(row, today)
             item_lines.extend(
                 [
                     "",
                     title,
-                    detail,
                 ]
             )
         items_text = "\n".join(item_lines).strip()
