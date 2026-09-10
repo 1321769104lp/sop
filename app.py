@@ -15,13 +15,12 @@ from dotenv import load_dotenv
 from delivery_rules import (
     cycle_days_for_level,
     delivery_label,
-    format_delivery_countdown,
-    format_summary_line,
     resolve_delivery_date,
     summarize_rows,
 )
 from database import (
     add_project,
+    add_notification_log,
     delete_project,
     get_project,
     get_project_milestones,
@@ -37,42 +36,65 @@ from database import (
     seed_sample_data,
     update_project,
 )
+from feishu import send_feishu_message
+from message_template import DEFAULT_MESSAGE_TEMPLATE, load_message_template, reset_message_template, save_message_template
 from project_parser import parse_chinese_schedule_text
 from scheduler import (
     build_feishu_message,
     build_today_rows,
+    contractor_output,
+    generate_reminder_check_times,
+    get_reminder_window,
     get_reminder_times,
+    reminder_window_minutes,
+    producer_action,
     send_daily_reminder,
     send_test_message,
-    start_scheduler,
+    update_reminder_window,
     update_reminder_times,
 )
 from scripts.export_actions_data import export_actions_data
+from styles import COLORS
+from ui_components import (
+    build_home_table,
+    inject_custom_css,
+    render_empty_state,
+    render_kpi_grid,
+    render_page_header,
+    render_project_cards,
+    render_section_title,
+)
 from utils_time import now_beijing, today_beijing
 
 
+DEFAULT_REMINDER_TIMES = "13:00"
 STATUS_OPTIONS = ["进行中", "已交付", "延期", "暂停"]
 LEVEL_OPTIONS = ["自定义", "S级", "A级", "B级"]
 GITHUB_REPOSITORY = "1321769104lp/sop"
 WORKFLOW_PATH = ".github/workflows/daily-feishu-reminder.yml"
+WORKFLOW_ID = "daily-feishu-reminder.yml"
+DEFAULT_REMINDER_WINDOW_START = "13:00"
+DEFAULT_REMINDER_WINDOW_END = "18:00"
+DEFAULT_REMINDER_CHECK_COUNT = 10
 
 
 def find_git_executable() -> str:
     """寻找可用的 Git。"""
-    bundled_git = r"C:\Users\zy-user\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd\git.exe"
-    return shutil.which("git") or bundled_git
+    git_exe = shutil.which("git")
+    if not git_exe:
+        raise RuntimeError("没有找到 Git。请先在这台电脑安装 Git。")
+    return git_exe
 
 
 def find_gh_executable() -> str:
     """寻找 GitHub CLI。"""
-    local_gh = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "tools",
-        "gh",
-        "bin",
-        "gh.exe",
-    )
-    return shutil.which("gh") or local_gh
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        shutil.which("gh"),
+        os.path.join(project_dir, "tools", "gh", "bin", "gh.exe"),
+        os.path.join(os.path.dirname(project_dir), "tools", "gh", "bin", "gh.exe"),
+    ]
+    return next((path for path in candidates if path and os.path.exists(path)), "gh")
 
 
 def run_git_command(args: list[str]) -> subprocess.CompletedProcess:
@@ -123,14 +145,16 @@ def beijing_time_to_utc_cron(reminder_time: str) -> tuple[int, int]:
     return utc_dt.minute, utc_dt.hour
 
 
-def build_workflow_content(reminder_times: list[str]) -> str:
-    """根据本地推送时间生成 GitHub Actions 定时文件。"""
+def build_workflow_content(start_time: str, end_time: str, check_count: int = DEFAULT_REMINDER_CHECK_COUNT) -> str:
+    """根据发送区间生成 GitHub Actions 定时文件。"""
+    check_times = generate_reminder_check_times(start_time, end_time, check_count)
+    retry_window_minutes = reminder_window_minutes(start_time, end_time)
     schedule_lines = []
-    for reminder_time in reminder_times:
-        minute, hour = beijing_time_to_utc_cron(reminder_time)
+    for check_time in check_times:
+        minute, hour = beijing_time_to_utc_cron(check_time)
         schedule_lines.extend(
             [
-                f"    # GitHub Actions uses UTC. Beijing time {reminder_time} = UTC {hour:02d}:{minute:02d}.",
+                f"    # Send window {start_time}-{end_time}; check at Beijing {check_time} = UTC {hour:02d}:{minute:02d}.",
                 f'    - cron: "{minute} {hour} * * *"',
             ]
         )
@@ -143,6 +167,9 @@ def build_workflow_content(reminder_times: list[str]) -> str:
             "  schedule:",
             *schedule_lines,
             "  workflow_dispatch:",
+            "",
+            "permissions:",
+            "  contents: write",
             "",
             "jobs:",
             "  send-reminder:",
@@ -163,7 +190,23 @@ def build_workflow_content(reminder_times: list[str]) -> str:
             "        env:",
             "          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}",
             "          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}",
+            f'          REMINDER_TIMES: "{start_time}"',
+            f'          RETRY_WINDOW_MINUTES: "{retry_window_minutes}"',
+            '          SEND_STATE_PATH: "data/github_send_state.json"',
             "        run: python scripts/send_github_reminder.py",
+            "",
+            "      - name: Persist send state",
+            "        if: success()",
+            "        run: |",
+            '          git config user.name "github-actions[bot]"',
+            '          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+            "          if [ -f data/github_send_state.json ]; then",
+            "            git add data/github_send_state.json",
+            "          fi",
+            "          if ! git diff --cached --quiet; then",
+            '            git commit -m "Record Feishu reminder send state"',
+            "            git push",
+            "          fi",
             "",
         ]
     )
@@ -196,6 +239,87 @@ def run_gh_api(args: list[str], payload: dict | None = None) -> subprocess.Compl
             os.remove(temp_path)
 
 
+def get_github_auto_push_state() -> str:
+    """读取 GitHub Actions 每日飞书工作流的启用状态。"""
+    result = run_gh_api(
+        [
+            f"repos/{GITHUB_REPOSITORY}/actions/workflows/{WORKFLOW_ID}",
+            "--jq",
+            ".state",
+        ]
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout)
+    return result.stdout.strip()
+
+
+def set_github_auto_push_enabled(enabled: bool) -> str:
+    """启用或暂停 GitHub Actions 每日自动飞书推送。"""
+    action = "enable" if enabled else "disable"
+    result = run_gh_api(
+        [
+            f"repos/{GITHUB_REPOSITORY}/actions/workflows/{WORKFLOW_ID}/{action}",
+            "--method",
+            "PUT",
+        ]
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout)
+    return get_github_auto_push_state()
+
+
+def render_auto_push_control():
+    """在侧边栏提供云端自动推送的暂停和恢复操作。"""
+    with st.sidebar.expander("自动飞书推送控制", expanded=True):
+        try:
+            workflow_state = get_github_auto_push_state()
+        except Exception as exc:
+            st.error(format_sync_error(exc))
+            st.caption("无法读取云端状态时，不会自动执行任何更改。")
+            return
+
+        is_active = workflow_state == "active"
+        if is_active:
+            st.success("当前状态：自动推送中")
+            st.caption("暂停后，GitHub 云端不再每日自动发送；页面手动发送仍可使用。")
+            confirmed = st.checkbox("我确认暂停每日自动推送", key="confirm_disable_auto_push")
+            if st.button(
+                "暂停自动飞书推送",
+                type="primary",
+                use_container_width=True,
+                disabled=not confirmed,
+            ):
+                try:
+                    new_state = set_github_auto_push_enabled(False)
+                    if new_state != "disabled_manually":
+                        raise RuntimeError(f"GitHub 返回了未预期的工作流状态：{new_state}")
+                    st.success("每日自动飞书推送已暂停。")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(format_sync_error(exc))
+        elif workflow_state == "disabled_manually":
+            st.warning("当前状态：自动推送已暂停")
+            st.caption("恢复后，GitHub 云端会继续按现有时间和消息规则自动发送。")
+            confirmed = st.checkbox("我确认恢复每日自动推送", key="confirm_enable_auto_push")
+            if st.button(
+                "恢复自动飞书推送",
+                type="primary",
+                use_container_width=True,
+                disabled=not confirmed,
+            ):
+                try:
+                    new_state = set_github_auto_push_enabled(True)
+                    if new_state != "active":
+                        raise RuntimeError(f"GitHub 返回了未预期的工作流状态：{new_state}")
+                    st.success("每日自动飞书推送已恢复。")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(format_sync_error(exc))
+        else:
+            st.warning(f"当前工作流状态：{workflow_state}")
+            st.caption("该状态不能在页面中直接切换，请先检查 GitHub Actions。")
+
+
 def update_github_text_file(path: str, content: str, message: str) -> str:
     """通过 GitHub API 更新远端文本文件。"""
     api_path = path.replace("\\", "/")
@@ -206,15 +330,17 @@ def update_github_text_file(path: str, content: str, message: str) -> str:
             ".sha",
         ]
     )
-    if sha_result.returncode != 0:
+    existing_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+    if sha_result.returncode != 0 and "Not Found" not in (sha_result.stderr or sha_result.stdout):
         raise RuntimeError(sha_result.stderr or sha_result.stdout)
 
     payload = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-        "sha": sha_result.stdout.strip(),
         "branch": "main",
     }
+    if existing_sha:
+        payload["sha"] = existing_sha
     update_result = run_gh_api(
         [
             f"repos/{GITHUB_REPOSITORY}/contents/{api_path}",
@@ -230,11 +356,15 @@ def update_github_text_file(path: str, content: str, message: str) -> str:
     return update_result.stdout.strip()
 
 
-def sync_everything_to_github() -> str:
+def sync_everything_to_github() -> dict:
     """同步本地项目数据和本地推送时间到 GitHub 云端。"""
     export_actions_data()
-    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
-    workflow_content = build_workflow_content(reminder_times)
+    reminder_window = get_reminder_window()
+    workflow_content = build_workflow_content(
+        reminder_window["start"],
+        reminder_window["end"],
+        reminder_window["check_count"],
+    )
 
     workflow_full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), WORKFLOW_PATH)
     with open(workflow_full_path, "w", encoding="utf-8", newline="\n") as handle:
@@ -243,6 +373,10 @@ def sync_everything_to_github() -> str:
     data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "projects_for_actions.json")
     with open(data_path, "r", encoding="utf-8") as handle:
         data_content = handle.read()
+
+    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "feishu_message_template.txt")
+    with open(template_path, "r", encoding="utf-8") as handle:
+        template_content = handle.read()
 
     data_sha = update_github_text_file(
         "data/projects_for_actions.json",
@@ -254,16 +388,77 @@ def sync_everything_to_github() -> str:
         workflow_content,
         "Sync reminder schedule times",
     )
-
-    return (
-        "已同步到 GitHub 云端：项目数据、推送时间和 GitHub Actions 定时配置都已更新。\n"
-        f"项目数据提交：{data_sha[:7]}；推送时间提交：{workflow_sha[:7]}。"
+    template_sha = update_github_text_file(
+        "data/feishu_message_template.txt",
+        template_content,
+        "Sync Feishu message template",
     )
+
+    return {
+        "title": "GitHub 云端同步完成",
+        "items": [
+            "项目数据同步成功",
+            "每日推送时间同步成功",
+            "GitHub Actions 定时配置同步成功",
+            "飞书发送模板同步成功",
+        ],
+        "details": {
+            "data": data_sha[:7],
+            "workflow": workflow_sha[:7],
+            "template": template_sha[:7],
+        },
+    }
+
+
+def render_sync_result(result: dict, sidebar=False):
+    """用清单展示同步结果，不把提交号或底层输出直接露给用户。"""
+    target = st.sidebar if sidebar else st
+    if sidebar:
+        target.success("同步完成")
+        return
+    target.success(result.get("title", "同步完成"))
+    for item in result.get("items", []):
+        target.markdown(f"- {item}")
+
+
+def format_sync_error(exc: Exception) -> str:
+    text = str(exc).strip().splitlines()[0] if str(exc).strip() else "未知错误"
+    if "Not Found" in text:
+        return "同步失败：GitHub 上没有找到对应文件或仓库权限不足。"
+    if "Bad credentials" in text or "Requires authentication" in text:
+        return "同步失败：GitHub 登录状态失效，请重新授权。"
+    if "failed to connect" in text.lower() or "could not resolve" in text.lower():
+        return "同步失败：当前网络无法连接 GitHub。"
+    return f"同步失败：{text[:160]}"
 
 
 def table_height(row_count: int, min_height: int = 260, max_height: int = 720) -> int:
     """根据行数给表格一个尽量够看的高度。"""
     return min(max_height, max(min_height, 90 + row_count * 44))
+
+
+def latest_push_subtitle() -> str:
+    """首页副标题：优先显示最近一次推送时间。"""
+    try:
+        logs = list_notification_logs(limit=1)
+    except Exception:
+        logs = []
+    if logs:
+        created_at = str(logs[0].get("created_at") or "")
+        if len(created_at) >= 16:
+            return f"北京时间｜上次推送 {created_at[11:16]}"
+    return "北京时间｜飞书推送预览已生成"
+
+
+def render_manual_send_button(key: str):
+    """在常用页面放一个直接手动发送飞书提醒的按钮。"""
+    if st.button("手动发送今日飞书提醒", type="primary", key=key):
+        try:
+            result = send_daily_reminder(send_type="manual")
+            st.success("今日飞书提醒已手动发送。")
+            st.caption(f"飞书返回：{result}")
+        except Exception as exc:
+            st.error(f"发送失败：{exc}")
 
 
 st.set_page_config(
@@ -275,11 +470,11 @@ st.set_page_config(
 
 @st.cache_resource
 def bootstrap_app():
-    """初始化数据库和后台定时任务。"""
+    """初始化本地页面数据；自动推送统一由 GitHub Actions 负责。"""
     load_dotenv()
-    init_db(default_reminder_time=os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+    init_db(default_reminder_time=os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", DEFAULT_REMINDER_TIMES)))
     seed_sample_data()
-    return start_scheduler()
+    return True
 
 
 def project_form(defaults: dict | None = None) -> dict:
@@ -325,49 +520,75 @@ def project_form(defaults: dict | None = None) -> dict:
 
 
 def show_today_page():
-    st.title("今日项目推进表")
     today = today_beijing()
     rows = build_today_rows(today=today)
+    summary = summarize_rows(rows)
 
-    st.markdown(f"**【今日短剧SOP｜{today.strftime('%Y-%m-%d')}】**")
-    st.write(format_summary_line(summarize_rows(rows)))
-
-    if not rows:
-        st.info("今日暂无需要提醒的项目。")
-        return
-
-    df = pd.DataFrame(rows)
-    df = df.rename(
-        columns={
-            "project_name": "原项目名",
-            "display_name": "项目名",
-            "start_date": "开始日期",
-            "delivery_countdown": "交付倒计时",
-            "stage": "当前阶段",
-            "today_focus": "今天重点",
-            "risk_brief": "风险提醒",
-            "status": "状态",
-            "remark": "备注",
-            "priority_label": "重点",
-        }
+    render_page_header(
+        f"今日项目提醒｜{today.strftime('%Y-%m-%d')}",
+        latest_push_subtitle(),
     )
-    df.insert(0, "序号", range(1, len(df) + 1))
-    display_cols = ["序号", "重点", "项目名", "交付倒计时", "当前阶段", "今天重点", "风险提醒", "状态"]
-    st.dataframe(
-        df[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        height=table_height(len(df)),
-        column_config={
-            "序号": st.column_config.NumberColumn("序号", width="small"),
-            "重点": st.column_config.TextColumn("重点", width="small"),
-            "项目名": st.column_config.TextColumn("项目名", width="large"),
-            "今天重点": st.column_config.TextColumn("今天重点", width="large"),
-            "风险提醒": st.column_config.TextColumn("风险提醒", width="large"),
-        },
+    render_manual_send_button("today_manual_send")
+
+    render_kpi_grid(
+        [
+            ("全部项目", summary["total"], None),
+            ("交付风险", summary["delivery_risk"], COLORS["delivery"]),
+            ("超期项目", summary["overdue"], COLORS["overdue"]),
+            ("今日节点", summary["today_nodes"], COLORS["today"]),
+        ]
     )
 
-    with st.expander("查看今日飞书推送预览"):
+    delivery_risk_rows = [
+        row for row in rows if row.get("is_overdue") or row.get("is_delivery_node") or row.get("is_delivery")
+    ]
+    delivery_risk_ids = {id(row) for row in delivery_risk_rows}
+    today_node_rows = [
+        row for row in rows if row.get("is_due_today") and id(row) not in delivery_risk_ids
+    ]
+    highlighted_ids = delivery_risk_ids | {id(row) for row in today_node_rows}
+    normal_rows = [row for row in rows if id(row) not in highlighted_ids]
+
+    render_section_title("交付风险", "交付倒计时 2 天内或已超期的项目")
+    render_project_cards(
+        delivery_risk_rows,
+        contractor_output,
+        producer_action,
+        "暂无交付风险项目",
+    )
+
+    render_section_title("今日节点", "今天进入关键 SOP 节点的项目")
+    render_project_cards(
+        today_node_rows,
+        contractor_output,
+        producer_action,
+        "暂无今日节点项目",
+    )
+
+    render_section_title("正常推进", "未进入交付风险和今日关键节点的项目")
+    if normal_rows:
+        home_df = build_home_table(normal_rows, contractor_output, producer_action)
+        st.dataframe(
+            home_df,
+            use_container_width=True,
+            hide_index=True,
+            height=table_height(len(home_df), min_height=240, max_height=560),
+            column_config={
+                "标签": st.column_config.TextColumn("标签", width="small"),
+                "项目名": st.column_config.TextColumn("项目名", width="large"),
+                "等级": st.column_config.TextColumn("等级", width="small"),
+                "D天数": st.column_config.TextColumn("D天数", width="small"),
+                "交付日期": st.column_config.TextColumn("交付日期", width="medium"),
+                "倒计时": st.column_config.TextColumn("倒计时", width="small"),
+                "承制方动作": st.column_config.TextColumn("承制方动作", width="large"),
+                "制片动作": st.column_config.TextColumn("制片动作", width="large"),
+                "状态": st.column_config.TextColumn("状态", width="small"),
+            },
+        )
+    else:
+        render_empty_state("暂无正常推进项目")
+
+    with st.expander("查看飞书推送预览", expanded=False):
         st.text(build_feishu_message(today=today))
 
 
@@ -477,9 +698,10 @@ def rebuild_project_to_delivery(project: dict, new_delivery_date: date, status: 
 def sync_after_project_change() -> tuple[bool, str]:
     """项目改动后自动同步云端，返回可展示的结果。"""
     try:
-        return True, sync_everything_to_github()
+        result = sync_everything_to_github()
+        return True, "；".join(result.get("items", ["GitHub 云端同步完成"]))
     except Exception as exc:
-        return False, f"本地已保存，但同步 GitHub 云端失败：{exc}"
+        return False, f"本地已保存，但{format_sync_error(exc)}"
 
 
 def set_workbench_notice(message: str, success: bool = True):
@@ -487,7 +709,7 @@ def set_workbench_notice(message: str, success: bool = True):
 
 
 def mark_project_delivered(project_id: int):
-    """确认已交付：标记为已交付并同步云端。"""
+    """确认已交付：标记为已交付。"""
     project = get_project(project_id)
     if not project:
         set_workbench_notice("项目不存在。", success=False)
@@ -498,12 +720,11 @@ def mark_project_delivered(project_id: int):
     data["remark"] = append_remark(data.get("remark", ""), "已确认交付。")
     update_project(project_id, data)
 
-    ok, sync_message = sync_after_project_change()
-    set_workbench_notice(f"《{project['project_name']}》已确认交付。\n{sync_message}", success=ok)
+    set_workbench_notice(f"《{project['project_name']}》已确认交付。需要同步云端时，请点击左侧“同步 GitHub 云端”。")
 
 
 def delay_project_delivery(project_id: int, delay_days: int):
-    """确认未交付：按延期天数重算交付日期和节点，并同步云端。"""
+    """确认未交付：按延期天数更新交付日期。"""
     project = get_project(project_id)
     if not project:
         set_workbench_notice("项目不存在。", success=False)
@@ -514,10 +735,8 @@ def delay_project_delivery(project_id: int, delay_days: int):
     new_delivery_date = base_date + timedelta(days=delay_days)
     rebuild_project_to_delivery(project, new_delivery_date, status="延期")
 
-    ok, sync_message = sync_after_project_change()
     set_workbench_notice(
-        f"《{project['project_name']}》已延期至 {new_delivery_date.strftime('%Y-%m-%d')}。\n{sync_message}",
-        success=ok,
+        f"《{project['project_name']}》已延期至 {new_delivery_date.strftime('%Y-%m-%d')}。需要同步云端时，请点击左侧“同步 GitHub 云端”。"
     )
 
 
@@ -730,6 +949,70 @@ def show_delivery_confirmation_page():
         st.divider()
 
 
+def parse_time_value(value: str) -> time:
+    return datetime.strptime(value, "%H:%M").time()
+
+
+def render_reminder_window_settings():
+    """项目工作台里的每日发送区间设置。"""
+    reminder_window = get_reminder_window()
+    st.subheader("每日发送区间")
+    st.caption("系统会在这个区间内自动生成 10 个检查点；任意一个检查点发送成功后，当天后面的检查点都会跳过。")
+
+    with st.form("reminder_window_form"):
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            start_value = st.time_input(
+                "开始时间",
+                value=parse_time_value(reminder_window["start"]),
+                step=300,
+                key="reminder_window_start",
+            )
+        with col2:
+            end_value = st.time_input(
+                "结束时间",
+                value=parse_time_value(reminder_window["end"]),
+                step=300,
+                key="reminder_window_end",
+            )
+        start_text = start_value.strftime("%H:%M")
+        end_text = end_value.strftime("%H:%M")
+
+        generated_times = []
+        preview_error = ""
+        try:
+            generated_times = generate_reminder_check_times(start_text, end_text, DEFAULT_REMINDER_CHECK_COUNT)
+        except Exception as exc:
+            preview_error = str(exc)
+
+        with col3:
+            if generated_times:
+                st.write("自动检查点：")
+                st.caption(" / ".join(generated_times))
+            else:
+                st.warning(preview_error or "请设置有效时间区间。")
+
+        save_col1, save_col2 = st.columns([1, 1])
+        with save_col1:
+            save_local = st.form_submit_button("保存发送区间", type="primary", use_container_width=True)
+        with save_col2:
+            save_and_sync = st.form_submit_button("保存并同步 GitHub 云端", use_container_width=True)
+
+        if save_local or save_and_sync:
+            try:
+                saved_window = update_reminder_window(start_text, end_text, DEFAULT_REMINDER_CHECK_COUNT)
+                if save_and_sync:
+                    result = sync_everything_to_github()
+                    st.success(f"已保存发送区间：{saved_window['start']} - {saved_window['end']}。")
+                    render_sync_result(result)
+                else:
+                    st.success(
+                        f"已保存发送区间：{saved_window['start']} - {saved_window['end']}。需要云端生效时，请点击左侧同步或这里的同步按钮。"
+                    )
+            except Exception as exc:
+                st.error(f"保存失败：{exc}")
+
+
 def show_project_workbench_page():
     st.title("项目工作台")
     show_workbench_notice()
@@ -740,16 +1023,51 @@ def show_project_workbench_page():
         return
 
     active_rows = [row for row in rows if row.get("status") != "已交付"]
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("全部项目", f"{len(rows)} 个")
-    metric_cols[1].metric("进行中", f"{len(active_rows)} 个")
-    metric_cols[2].metric("今天/超期", f"{sum(1 for row in active_rows if row['delivery_delta'] <= 0)} 个")
-    metric_cols[3].metric("已交付", f"{sum(1 for row in rows if row.get('status') == '已交付')} 个")
+    render_kpi_grid(
+        [
+            ("全部项目", len(rows), None),
+            ("进行中", len(active_rows), COLORS["normal"]),
+            ("今天/超期", sum(1 for row in active_rows if row["delivery_delta"] <= 0), COLORS["delivery"]),
+            ("已交付", sum(1 for row in rows if row.get("status") == "已交付"), COLORS["first"]),
+        ]
+    )
+    render_reminder_window_settings()
+
+    filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1])
+    with filter_col1:
+        status_filter = st.multiselect("状态", STATUS_OPTIONS, placeholder="全部状态")
+    with filter_col2:
+        level_filter = st.multiselect("等级", LEVEL_OPTIONS, placeholder="全部等级")
+    with filter_col3:
+        risk_filter = st.selectbox("交付风险", ["全部项目", "只看交付风险", "只看非风险"])
+
+    filtered_rows = rows
+    if status_filter:
+        filtered_rows = [row for row in filtered_rows if (row.get("status") or "进行中") in status_filter]
+    if level_filter:
+        filtered_rows = [row for row in filtered_rows if (row.get("project_level") or "自定义") in level_filter]
+    if risk_filter == "只看交付风险":
+        filtered_rows = [
+            row
+            for row in filtered_rows
+            if row.get("status") != "已交付" and not row.get("is_estimated_delivery") and row["delivery_delta"] <= 2
+        ]
+    elif risk_filter == "只看非风险":
+        filtered_rows = [
+            row
+            for row in filtered_rows
+            if row.get("status") == "已交付" or row.get("is_estimated_delivery") or row["delivery_delta"] > 2
+        ]
+
+    if not filtered_rows:
+        render_empty_state("当前筛选条件下暂无项目")
+        return
 
     table_rows = []
-    for row in rows:
+    for row in filtered_rows:
         table_rows.append(
             {
+                "删除": False,
                 "ID": row["id"],
                 "交付状态": row["delivery_badge"],
                 "交付类型": delivery_label(row),
@@ -771,7 +1089,22 @@ def show_project_workbench_page():
         height=table_height(len(table_rows), min_height=360, max_height=760),
         num_rows="fixed",
         disabled=["ID", "交付状态", "交付类型", "开始制作日期"],
+        column_order=[
+            "删除",
+            "项目名",
+            "交付状态",
+            "交付类型",
+            "交付日期",
+            "项目等级",
+            "当前状态",
+            "集数",
+            "负责人",
+            "开始制作日期",
+            "备注",
+            "ID",
+        ],
         column_config={
+            "删除": st.column_config.CheckboxColumn("删除", help="勾选后可在下方删除项目", width="small"),
             "ID": st.column_config.NumberColumn("ID", width="small"),
             "交付状态": st.column_config.TextColumn("交付状态", width="small"),
             "交付类型": st.column_config.TextColumn("交付类型", width="small"),
@@ -786,18 +1119,46 @@ def show_project_workbench_page():
         },
     )
 
-    if st.button("保存工作台修改并同步 GitHub 云端", type="primary"):
-        try:
-            changed_count, rebuilt_count, delivered_count = save_workbench_edits(edited_df)
-            if changed_count == 0:
-                set_workbench_notice("没有检测到需要保存的修改。")
-            else:
-                ok, sync_message = sync_after_project_change()
-                message = f"已保存 {changed_count} 个项目；更新交付日期 {rebuilt_count} 个；移出提醒 {delivered_count} 个。\n{sync_message}"
-                set_workbench_notice(message, success=ok)
+    filtered_ids = {item["id"] for item in filtered_rows}
+    selected_for_delete = [
+        row for _, row in edited_df.iterrows() if bool(row.get("删除")) and int(row["ID"]) in filtered_ids
+    ]
+
+    action_col1, action_col2, action_col3 = st.columns([1.2, 1.4, 1])
+    with action_col1:
+        if st.button("保存工作台修改", type="primary", use_container_width=True):
+            try:
+                changed_count, rebuilt_count, delivered_count = save_workbench_edits(edited_df)
+                if changed_count == 0:
+                    set_workbench_notice("没有检测到需要保存的修改。")
+                else:
+                    message = f"已保存 {changed_count} 个项目；更新交付日期 {rebuilt_count} 个；移出提醒 {delivered_count} 个。需要同步云端时，请点击左侧“同步 GitHub 云端”。"
+                    set_workbench_notice(message)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"保存失败：{exc}")
+
+    with action_col2:
+        delete_confirm = st.checkbox(
+            f"确认删除已勾选的 {len(selected_for_delete)} 个项目",
+            disabled=not selected_for_delete,
+            key="workbench_inline_delete_confirm",
+        )
+
+    with action_col3:
+        if st.button(
+            "删除勾选项目",
+            disabled=not selected_for_delete or not delete_confirm,
+            use_container_width=True,
+        ):
+            deleted_names = []
+            for row in selected_for_delete:
+                delete_project(int(row["ID"]))
+                deleted_names.append(clean_cell(row["项目名"]))
+            set_workbench_notice(
+                f"已删除 {len(deleted_names)} 个项目。需要同步云端时，请点击左侧“同步 GitHub 云端”。"
+            )
             st.rerun()
-        except Exception as exc:
-            st.error(f"保存失败：{exc}")
 
 
 def project_name_exists(project_name: str) -> bool:
@@ -807,7 +1168,7 @@ def project_name_exists(project_name: str) -> bool:
 
 
 def handle_smart_add():
-    """智能识别新增的按钮回调：保存成功后清空粘贴框。"""
+    """导入粘贴识别结果的按钮回调：保存成功后清空粘贴框。"""
     text = st.session_state.get("smart_schedule_text", "")
     year = int(st.session_state.get("smart_schedule_year", today_beijing().year))
 
@@ -855,8 +1216,8 @@ def save_quick_project(project_name: str, project_level: str, delivery_date: dat
 
 
 def show_smart_add_page():
-    st.title("智能识别新增")
-    st.write("项目名手动填写，等级和交付时间直接选择；如果已有完整排期，也可以继续粘贴识别。")
+    st.title("新增项目")
+    st.write("填写项目名，选择等级和交付日期即可新建。")
 
     if st.session_state.get("smart_add_success"):
         message = st.session_state.pop("smart_add_success")
@@ -865,28 +1226,8 @@ def show_smart_add_page():
     if st.session_state.get("smart_add_error"):
         st.error(st.session_state.pop("smart_add_error"))
 
-    if "smart_schedule_text" not in st.session_state:
-        st.session_state["smart_schedule_text"] = ""
-
-    text = st.text_area(
-        "粘贴排期文本",
-        key="smart_schedule_text",
-        height=128,
-        placeholder=(
-            "项目：我的妈咪是冰雪女王：My Mom Is the Ice Queen\n"
-            "等级：S级\n"
-            "交付时间：7月14日\n\n"
-            "也支持完整节点：\n"
-            "资产确定（3天）6月19日\n"
-            "首集制作与修改（2天）6月21日\n"
-            "一卡前制作（5天）6月26日\n"
-            "全集制作（16天）7月12日\n"
-            "终审与交付（2天）7月14日"
-        ),
-    )
-
     with st.form("quick_project_form"):
-        st.subheader("选择新增")
+        st.subheader("新建项目")
         quick_col1, quick_col2, quick_col3 = st.columns([2, 1, 1])
         with quick_col1:
             quick_project_name = st.text_input("项目名", key="quick_project_name")
@@ -895,62 +1236,9 @@ def show_smart_add_page():
         with quick_col3:
             quick_delivery_date = st.date_input("交付日期", value=today_beijing(), key="quick_delivery_date")
 
-        quick_submit = st.form_submit_button("按选择新建项目", type="primary")
+        quick_submit = st.form_submit_button("新建项目", type="primary")
         if quick_submit:
             save_quick_project(quick_project_name, quick_project_level, quick_delivery_date)
-
-    year = st.number_input(
-        "年份",
-        min_value=2020,
-        max_value=2100,
-        value=today_beijing().year,
-        key="smart_schedule_year",
-    )
-
-    parsed = None
-    duplicate = False
-    if text.strip():
-        try:
-            parsed = parse_chinese_schedule_text(text, year=int(year))
-            duplicate = project_name_exists(parsed["project_name"])
-            if duplicate:
-                st.warning(f"项目“{parsed['project_name']}”已存在，不能重复新建。")
-            else:
-                st.success("已识别成功，请确认后保存。")
-            milestones = parsed.get("milestones", [])
-            delivery_date = parsed.get("delivery_date") or (milestones[-1]["due_date"] if milestones else "")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("开始制作日期", parsed["start_date"])
-            col2.metric("交付节点", delivery_date)
-            col3.metric("节点数量", f"{len(milestones)} 个")
-            st.write(f"项目名：{parsed['project_name']}")
-            if milestones:
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            {
-                                "节点": item["name"],
-                                "周期": f"{item['duration']} 天",
-                                "节点日期": item["due_date"],
-                            }
-                            for item in milestones
-                        ]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            st.caption(
-                f"默认：集数 {parsed['episodes']} / 等级 {parsed['project_level']} / 状态 {parsed['status']}"
-            )
-        except Exception as exc:
-            st.warning(f"暂时无法识别：{exc}")
-
-    st.button(
-        "确认新建项目",
-        type="primary",
-        disabled=parsed is None or duplicate,
-        on_click=handle_smart_add,
-    )
 
 
 def show_edit_page():
@@ -1024,17 +1312,125 @@ def show_delete_page():
         st.rerun()
 
 
-def show_feishu_page():
-    st.title("飞书配置测试")
+def send_custom_feishu_message(text: str) -> dict:
+    """发送用户临时编辑后的飞书文案，并记录日志。"""
     load_dotenv()
     webhook_url = os.getenv("FEISHU_WEBHOOK_URL", "")
     secret = os.getenv("FEISHU_SECRET", "")
-    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+    message = text.strip()
+    if not message:
+        raise ValueError("推送文案不能为空。")
+
+    try:
+        result = send_feishu_message(webhook_url, secret, message)
+        add_notification_log("manual_custom", "success", message=message)
+        return result
+    except Exception as exc:
+        add_notification_log("manual_custom", "failed", message=message, error=str(exc))
+        raise
+
+
+def render_feishu_template_editor():
+    st.subheader("每日推送模板")
+    st.caption("这里改的是每天自动生成飞书消息的模板；保存后，本地自动推送和 GitHub 云端推送都会按这个模板生成。")
+
+    if "feishu_message_template_draft" not in st.session_state:
+        st.session_state["feishu_message_template_draft"] = load_message_template()
+
+    template_col, preview_col = st.columns([3, 2])
+    with template_col:
+        template_text = st.text_area(
+            "模板内容",
+            key="feishu_message_template_draft",
+            height=260,
+            help="可用占位符：{date} 日期、{summary} 总览、{separator} 分割线、{items} 项目明细、{title} 标题。",
+        )
+        action_col1, action_col2, action_col3 = st.columns(3)
+        with action_col1:
+            if st.button("保存每日模板", type="primary", use_container_width=True):
+                try:
+                    save_message_template(template_text)
+                    st.success("每日推送模板已保存。云端推送需要点击左侧“同步 GitHub 云端”后生效。")
+                except Exception as exc:
+                    st.error(f"保存失败：{exc}")
+        with action_col2:
+            if st.button("保存并同步云端", use_container_width=True):
+                try:
+                    save_message_template(template_text)
+                    result = sync_everything_to_github()
+                    st.success("每日推送模板已保存。")
+                    render_sync_result(result)
+                except Exception as exc:
+                    st.error(format_sync_error(exc))
+        with action_col3:
+            if st.button("恢复默认模板", use_container_width=True):
+                reset_message_template()
+                st.session_state["feishu_message_template_draft"] = DEFAULT_MESSAGE_TEMPLATE
+                st.rerun()
+
+    with preview_col:
+        st.markdown("**模板预览**")
+        try:
+            preview = build_feishu_message(today=today_beijing(), template_text=template_text)
+            st.text_area("按当前模板生成的今日消息", value=preview, height=260, disabled=True)
+        except Exception as exc:
+            st.warning(f"模板暂时无法预览：{exc}")
+
+
+def render_custom_feishu_editor(webhook_url: str):
+    st.subheader("编辑并发送今日推送")
+    st.caption("这里是临时手改发送，不会修改项目数据，也不会影响自动推送规则。")
+
+    default_message = build_feishu_message(today=today_beijing())
+    if st.session_state.get("custom_feishu_base_date") != today_beijing().strftime("%Y-%m-%d"):
+        st.session_state["custom_feishu_message"] = default_message
+        st.session_state["custom_feishu_base_date"] = today_beijing().strftime("%Y-%m-%d")
+
+    edit_col, preview_col = st.columns([3, 2])
+    with edit_col:
+        custom_message = st.text_area(
+            "今日推送文案",
+            key="custom_feishu_message",
+            height=420,
+            help="可以直接删改文字。只影响这次手动发送，不会保存为规则。",
+        )
+    with preview_col:
+        st.markdown("**发送前检查**")
+        st.write("当前字数：", len(custom_message.strip()))
+        st.write("飞书机器人：", "已配置" if webhook_url else "未配置")
+        st.info("建议只在临时强调、删减项目、补充口径时手改；项目日期和节点仍回到项目工作台维护。")
+        if st.button("恢复自动生成文案", use_container_width=True):
+            st.session_state["custom_feishu_message"] = default_message
+            st.rerun()
+
+    confirm_send = st.checkbox("我确认发送上面这版文案到飞书", key="confirm_custom_feishu_send")
+    send_disabled = (not webhook_url) or (not custom_message.strip()) or (not confirm_send)
+    if st.button("发送这版文案到飞书", type="primary", disabled=send_disabled):
+        try:
+            result = send_custom_feishu_message(custom_message)
+            st.success(f"已发送这版文案：{result}")
+        except Exception as exc:
+            st.error(f"发送失败：{exc}")
+
+
+def show_feishu_page():
+    st.title("飞书推送")
+    load_dotenv()
+    webhook_url = os.getenv("FEISHU_WEBHOOK_URL", "")
+    secret = os.getenv("FEISHU_SECRET", "")
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", DEFAULT_REMINDER_TIMES)))
 
     st.write("Webhook URL：", "已配置" if webhook_url else "未配置")
     st.write("Secret：", "已配置" if secret else "未配置，可用于未开启签名的机器人")
     st.write("今日自动推送：", "已成功" if has_successful_auto_log() else "未看到成功记录")
 
+    with st.expander("每日发送模板编辑", expanded=True):
+        render_feishu_template_editor()
+
+    with st.expander("编辑并发送今日推送", expanded=True):
+        render_custom_feishu_editor(webhook_url)
+
+    st.divider()
     st.subheader("本地推送时间")
     st.caption("每行一个时间。本地后台会按这些时间推送；点左侧同步后，GitHub 云端也会使用同一组时间。")
     new_times_text = st.text_area(
@@ -1079,9 +1475,10 @@ def show_feishu_page():
         try:
             saved_times = update_reminder_times(new_times_text)
             result = sync_everything_to_github()
-            st.success(f"本地时间已保存：{', '.join(saved_times)}。\n{result}")
+            st.success(f"本地时间已保存：{', '.join(saved_times)}。")
+            render_sync_result(result)
         except Exception as exc:
-            st.error(f"同步失败：{exc}")
+            st.error(format_sync_error(exc))
 
     st.divider()
     if st.button("立即发送今日提醒"):
@@ -1170,16 +1567,16 @@ def render_cloud_sync_section():
     if st.button("同步全部到 GitHub 云端", key="data_sync_all"):
         try:
             result = sync_everything_to_github()
-            st.success(result)
+            render_sync_result(result)
         except Exception as exc:
-            st.error(f"同步失败：{exc}")
+            st.error(format_sync_error(exc))
 
 
 def show_data_management_page():
-    st.title("数据管理")
+    st.title("数据导入导出")
     total_projects = len(list_projects(include_delivered=True))
     active_projects = len(list_projects(include_delivered=False))
-    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", "09:57,16:00")))
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", DEFAULT_REMINDER_TIMES)))
 
     metric_cols = st.columns(3)
     metric_cols[0].metric("全部项目", f"{total_projects} 个")
@@ -1207,43 +1604,51 @@ def show_export_page():
     render_cloud_sync_section()
 
 
+def show_system_settings_page():
+    st.title("系统设置")
+    st.info("系统设置暂时保持轻量：项目、推送时间和云端同步入口仍在对应页面管理，避免误改业务规则。")
+
+    reminder_times = get_reminder_times(os.getenv("REMINDER_TIMES", os.getenv("REMINDER_TIME", DEFAULT_REMINDER_TIMES)))
+    st.write("当前本地推送时间：", " / ".join(reminder_times))
+    st.write("云端同步：请使用左侧醒目的“同步 GitHub 云端”按钮，或在“数据导入导出”页面执行。")
+
+
 def main():
     bootstrap_app()
+    inject_custom_css()
 
-    st.sidebar.title("短剧SOP")
-    if st.sidebar.button("⏻ 同步 GitHub 云端", type="primary", use_container_width=True):
+    st.sidebar.markdown('<div class="sop-sidebar-brand">短剧SOP</div>', unsafe_allow_html=True)
+    if st.sidebar.button("同步 GitHub 云端", type="primary", use_container_width=True):
         try:
             result = sync_everything_to_github()
-            st.sidebar.success(result)
+            render_sync_result(result, sidebar=True)
         except Exception as exc:
-            st.sidebar.error(f"同步失败：{exc}")
-    st.sidebar.caption("本地项目、推送时间、云端定时一起同步。")
+            st.sidebar.error(format_sync_error(exc))
+    st.sidebar.markdown(
+        '<div class="sop-sidebar-note">本地项目、推送时间、云端定时一起同步。</div>',
+        unsafe_allow_html=True,
+    )
+    render_auto_push_control()
     st.sidebar.divider()
 
     page = st.sidebar.radio(
         "后台页面",
         [
-            "今日提醒",
-            "智能识别新增",
-            "交付确认",
+            "今日看板",
             "项目工作台",
-            "飞书配置测试",
-            "数据管理",
+            "新增项目",
+            "交付确认",
         ],
     )
 
-    if page == "今日提醒":
+    if page == "今日看板":
         show_today_page()
-    elif page == "智能识别新增":
+    elif page == "项目工作台":
+        show_project_workbench_page()
+    elif page == "新增项目":
         show_smart_add_page()
     elif page == "交付确认":
         show_delivery_confirmation_page()
-    elif page == "项目工作台":
-        show_project_workbench_page()
-    elif page == "飞书配置测试":
-        show_feishu_page()
-    elif page == "数据管理":
-        show_data_management_page()
 
 
 if __name__ == "__main__":
